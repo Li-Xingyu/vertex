@@ -1,0 +1,16 @@
+.git
+node_modules
+webui/node_modules
+app/data
+app/db
+logs
+torrents
+.env
+*.pem
+*.key
+AGENTS.md
+CLAUDE.md
+assets
+docker-build
+.env.*
+*.log

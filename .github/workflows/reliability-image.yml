@@ -1,0 +1,44 @@
+name: Reliability image
+on:
+  push:
+    branches:
+      - fix/async-db-rss-reliability
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: reliability-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare immutable image tag
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
+      - name: Build from pinned official runtime
+        run: docker buildx build --platform linux/amd64 --load -f docker/Dockerfile.reliability --build-arg VERTEX_REVISION="$GITHUB_SHA" -t "$IMAGE:$TAG" .
+      - name: Real SQLite and RSS regression tests
+        run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=128m --entrypoint node "$IMAGE:$TAG" test/reliability.js
+      - name: Lint changed application modules
+        run: docker run --rm --network none --read-only --entrypoint ./node_modules/.bin/eslint "$IMAGE:$TAG" app/libs/database.js app/libs/database-worker.js app/libs/rss-admission.js app/libs/util.js app/libs/client/qb.js app/common/Client.js app/common/Rss.js test
+      - name: Fresh isolated application startup
+        run: |
+          trap 'docker rm -f vertex-reliability-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name vertex-reliability-smoke --network none --tmpfs /vertex:rw,nosuid,size=128m -e TZ=Asia/Shanghai "$IMAGE:$TAG"
+          docker exec vertex-reliability-smoke node test/startup-smoke.js
+      - name: Login to own GHCR namespace
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Publish only the tested immutable tag
+        run: docker push "$IMAGE:$TAG"
+      - name: Record artifact
+        run: |
+          echo "### Verified image" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect "$IMAGE:$TAG" --format '{{join .RepoDigests "\n"}}' >> "$GITHUB_STEP_SUMMARY"

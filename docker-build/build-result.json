@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-04T20:20:00+08:00",
+  "phase": "build",
+  "outcome": "success",
+  "iterations": [{"iteration": 1, "status": "success", "error_category": null, "error_excerpt": null, "fix_applied": null}],
+  "total_iterations": 1,
+  "scope": "Final packaging validation after application regression fixes; earlier development builds are not release iterations",
+  "complexity_level": "L2",
+  "build": {"command": "docker buildx build --platform linux/amd64 --load -f docker/Dockerfile.reliability --build-arg VERTEX_REVISION=local-regression -t vertex-reliability-test:20261004 .", "image_name": "vertex-reliability-test:20261004", "exit_code": 0, "image_size_mb": 570.6},
+  "fixes_applied": [],
+  "errors_not_matched": []
+}

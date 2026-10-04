@@ -322,20 +322,31 @@ class Client {
     }
   };
 
-  async addTorrent (torrentUrl, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused) {
+  async addTorrent (torrentUrl, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused, deferFlow = false) {
     if (!this.status) {
-      throw new Error('客户端' + this.alias + '当前状态为不可用');
+      const error = new Error('客户端' + this.alias + '当前状态为不可用');
+      error.notSubmitted = true;
+      throw error;
     }
     const { statusCode } = await this.client.addTorrent(this.clientUrl, this.cookie, torrentUrl, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, this.firstLastPiecePrio, paused);
     if (statusCode !== 200 && statusCode !== 202 && statusCode !== 204) {
-      this.login();
-      throw new Error('状态码: ' + statusCode);
+      this.login().catch(() => logger.warn(this.alias, '下载器重新登录失败'));
+      const error = new Error('状态码: ' + statusCode);
+      error.notSubmitted = [400, 401, 403, 404, 405, 415, 422].includes(statusCode);
+      throw error;
     }
     if (this.maindata) {
       this.maindata.leechingCount += 1;
     }
-    await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
-      [hash, 0, 0, moment().unix() - moment().unix() % 300]);
+    if (!deferFlow) {
+      try {
+        await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
+          [hash, 0, 0, moment().unix() - moment().unix() % 300]);
+      } catch (error) {
+        error.torrentAccepted = true;
+        throw error;
+      }
+    }
   };
 
   async addTorrentTag (hash, tag) {
@@ -344,17 +355,36 @@ class Client {
     }
   }
 
-  async addTorrentByTorrentFile (filepath, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused) {
+  async addTorrentByTorrentFile (filepath, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused, deferFlow = false) {
+    if (!this.status) {
+      const error = new Error('客户端' + this.alias + '当前状态为不可用');
+      error.notSubmitted = true;
+      throw error;
+    }
     const { statusCode } = await this.client.addTorrentByTorrentFile(this.clientUrl, this.cookie, filepath, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, this.firstLastPiecePrio, paused);
     if (statusCode !== 200 && statusCode !== 202 && statusCode !== 204) {
-      this.login();
-      throw new Error('状态码: ' + statusCode);
+      this.login().catch(() => logger.warn(this.alias, '下载器重新登录失败'));
+      const error = new Error('状态码: ' + statusCode);
+      error.notSubmitted = [400, 401, 403, 404, 405, 415, 422].includes(statusCode);
+      throw error;
     }
     if (this.maindata) {
       this.maindata.leechingCount += 1;
     }
-    await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
-      [hash, 0, 0, moment().unix() - moment().unix() % 300]);
+    if (!deferFlow) {
+      try {
+        await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
+          [hash, 0, 0, moment().unix() - moment().unix() % 300]);
+      } catch (error) {
+        error.torrentAccepted = true;
+        throw error;
+      }
+    }
+  };
+
+  async hasTorrent (hash) {
+    if (this._client.type !== 'qBittorrent' || !this.client.hasTorrent) return false;
+    return this.client.hasTorrent(this.clientUrl, this.cookie, hash);
   };
 
   async reannounceTorrent (torrent) {
@@ -468,39 +498,60 @@ class Client {
   };
 
   async record () {
-    if (!this.maindata) return;
+    if (!this.maindata || this.recordInProgress) return;
+    this.recordInProgress = true;
+    try {
+      return await this._recordSnapshot();
+    } finally {
+      this.recordInProgress = false;
+    }
+  };
+
+  async _recordSnapshot () {
     const torrentSet = {};
+    const snapshot = this.maindata.torrents.map(torrent => ({ ...torrent }));
     const now = moment().startOf('minute').unix();
-    const allTorrentLastMinute = await util.getRecords('select * from torrent_flow where time = ?', [moment().startOf('minute').subtract(5, 'minute').unix()]);
+    const scheduling = { priority: 'background' };
+    const allTorrentLastMinute = await util.getRecords('select * from torrent_flow where time = ?', [moment().startOf('minute').subtract(5, 'minute').unix()], scheduling);
     allTorrentLastMinute.forEach(i => {
       torrentSet[i.hash] = i;
     });
     const trackerSet = {};
-    for (const torrent of this.maindata.torrents) {
+    let operations = [];
+    for (const torrent of snapshot) {
       const cache = await redis.get('vertex:torrent:' + torrent.hash);
       // 0 无记录  1 种子存在  2 种子不存在
       if (!cache) {
-        const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? and record_type = 1', [torrent.hash]);
+        const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? and record_type = 1', [torrent.hash], scheduling);
         await redis.set('vertex:torrent:' + torrent.hash, sqlRes ? 1 : 2);
         if (!sqlRes) continue;
       }
       if (+cache === 2) continue;
-      await util.runRecord('update torrents set size = ?, tracker = ?, upload = ?, download = ? where hash = ?',
-        [torrent.size, torrent.tracker, torrent.uploaded, torrent.downloaded, torrent.hash]);
-      await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
-        [torrent.hash, torrent.uploaded, torrent.downloaded, now]);
+      operations.push({
+        sql: 'update torrents set size = ?, tracker = ?, upload = ?, download = ? where hash = ?',
+        params: [torrent.size, torrent.tracker, torrent.uploaded, torrent.downloaded, torrent.hash]
+      });
+      operations.push({
+        sql: 'insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
+        params: [torrent.hash, torrent.uploaded, torrent.downloaded, now]
+      });
+      if (operations.length >= 64) {
+        await util.runRecords(operations, scheduling);
+        operations = [];
+      }
       if (!trackerSet[torrent.tracker]) trackerSet[torrent.tracker] = { upload: 0, download: 0, time: now };
       torrentSet[torrent.hash] = torrentSet[torrent.hash] || { upload: torrent.uploaded, download: torrent.downloaded };
       trackerSet[torrent.tracker].upload += torrent.uploaded - torrentSet[torrent.hash].upload;
       trackerSet[torrent.tracker].download += torrent.downloaded - torrentSet[torrent.hash].download;
     }
+    if (operations.length) await util.runRecords(operations, scheduling);
     for (const key of Object.keys(trackerSet)) {
       const tracker = trackerSet[key];
-      const record = await util.getRecord('select * from tracker_flow where tracker = ? and time = ?', [key, now]);
+      const record = await util.getRecord('select * from tracker_flow where tracker = ? and time = ?', [key, now], scheduling);
       if (!record) {
-        await util.runRecord('insert into tracker_flow (tracker, upload, download, time) values (?, ?, ?, ?)', [key, tracker.upload, tracker.download, now]);
+        await util.runRecord('insert into tracker_flow (tracker, upload, download, time) values (?, ?, ?, ?)', [key, tracker.upload, tracker.download, now], scheduling);
       } else {
-        await util.runRecord('update tracker_flow set upload = upload + ?, download = download + ? where tracker = ? and time = ?', [tracker.upload, tracker.download, key, now]);
+        await util.runRecord('update tracker_flow set upload = upload + ?, download = download + ? where tracker = ? and time = ?', [tracker.upload, tracker.download, key, now], scheduling);
       }
     }
   };

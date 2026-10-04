@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-04T20:20:00+08:00",
+  "phase": "validation",
+  "outcome": "success",
+  "container_startup": {"status": "running", "all_containers_up": true, "crash_detected": false, "network": "none", "published_ports": []},
+  "migration": {"applicable": true, "orm": "none", "expected_count": 1, "actual_count": 1, "tables_exist": true, "tables_verified": ["torrents", "torrent_flow", "tracker_flow", "vertex_rss_pending"], "status": "success"},
+  "http_health": {"url": "http://127.0.0.1:3000/", "http_code": 302, "acceptable": true},
+  "application_smoke": {"login": true, "databaseHistory": true, "compiledUi": true},
+  "regression": {"passed": 31, "real_sqlite": true, "node": "v14.20.0", "better_sqlite3": "7.5.3", "lint_passed": true},
+  "log_analysis": {"error_count": 0, "scope": "Fresh disposable container only; credential contents are not printed"},
+  "checklist": {"image_built": true, "container_started": true, "database_connected": true, "migrations_executed": true, "tables_created": true, "http_valid_response": true, "no_runtime_errors": true, "healthcheck_passed": true},
+  "summary": "Local Linux amd64 container and isolated regressions passed; production NAS, FUSE, trackers and custom safety-hook compatibility are not yet verified."
+}

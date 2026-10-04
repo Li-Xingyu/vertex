@@ -1,0 +1,20 @@
+# Reuse the official runtime and unchanged compiled UI, pinned by digest.
+FROM lswl/vertex@sha256:25104a02b345108e8c7cb2dfbf81a4e5fd38c5d839371584e75629816f06d62f
+ARG VERTEX_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/Li-Xingyu/vertex" \
+      org.opencontainers.image.revision="${VERTEX_REVISION}" \
+      org.opencontainers.image.title="Vertex asynchronous database reliability build"
+COPY app/app.js /app/vertex/app/app.js
+COPY app/common /app/vertex/app/common
+COPY app/controller /app/vertex/app/controller
+COPY app/libs /app/vertex/app/libs
+COPY app/model /app/vertex/app/model
+COPY app/routes /app/vertex/app/routes
+COPY app/config /app/vertex/app/config_backup
+COPY docker/start.sh /app/vertex/docker/start.sh
+RUN sed -i 's/\r$//' /app/vertex/docker/start.sh
+COPY test /app/vertex/test
+WORKDIR /app/vertex
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD node -e "const r=require('http').get({hostname:'127.0.0.1',port:process.env.PORT||3000,path:'/',timeout:3000},s=>{s.resume();process.exit([200,302,401].includes(s.statusCode)?0:1)});r.on('timeout',()=>r.destroy());r.on('error',()=>process.exit(1))"
+# Preserve the official CMD, /vertex storage layout and default durability.

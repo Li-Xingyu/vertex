@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const moment = require('moment');
 const Push = require('./Push');
+const admission = require('../libs/rss-admission');
 
 class Rss {
   constructor (rss) {
@@ -36,8 +37,9 @@ class Rss {
     this.useCustomRegex = rss.useCustomRegex;
     this.regexStr = rss.regexStr;
     this.replaceStr = rss.replaceStr;
-    this.addCountPerHour = +rss.addCountPerHour || 20;
+    this.addCountPerHour = rss.addCountPerHour === 0 || rss.addCountPerHour === '0' ? 0 : (+rss.addCountPerHour || 20);
     this.addCount = 0;
+    this.countHour = Math.floor(Date.now() / 3600000);
     this.pushTorrentFile = rss.pushTorrentFile;
     this.notify = util.listPush().filter(item => item.id === rss.notify)[0] || {};
     this.notify.push = rss.pushNotify;
@@ -54,7 +56,7 @@ class Rss {
     this.maxClientDownloadCount = +rss.maxClientDownloadCount;
     if (!rss.dryrun) {
       this.rssJob = cron.schedule(rss.cron, async () => { try { await this.rss(); } catch (e) { logger.error(this.alias, e); } });
-      this.clearCount = cron.schedule('0 * * * *', () => { this.addCount = 0; });
+      this.clearCount = cron.schedule('0 * * * *', () => this._updateHourCount());
       logger.info('Rss 任务', this.alias, '初始化完毕');
     }
   }
@@ -201,6 +203,60 @@ class Rss {
     this.ntf = new Push(this.notify);
   }
 
+  _updateHourCount () {
+    const hour = Math.floor(Date.now() / 3600000);
+    if (this.countHour !== hour) {
+      this.countHour = hour;
+      this.addCount = 0;
+    }
+  }
+
+  async _addTracked (torrent, client, category, reseed, submit) {
+    const operation = await admission.reserve(this, torrent, client, category, reseed);
+    if (!operation) return { deferred: 'reserved' };
+    this.addCount += 1;
+    const state = { requestStarted: false, accepted: false, trueHash: '' };
+    try {
+      await submit(operation, state);
+      state.accepted = true;
+      const actualHash = state.trueHash || (admission.isHash(torrent.hash) ? torrent.hash : '');
+      if (client._client.type === 'qBittorrent') {
+        await admission.mark(operation, 'confirming', actualHash);
+        if (!actualHash || !await client.hasTorrent(actualHash)) return { deferred: 'confirmation', accepted: true };
+        await admission.mark(operation, 'confirmed', actualHash);
+      } else {
+        await admission.mark(operation, 'accepted', actualHash);
+      }
+      await admission.finish(this, torrent, client, category, operation, state.trueHash, reseed);
+    } catch (error) {
+      if (state.accepted || error.torrentAccepted) {
+        try { await admission.mark(operation, 'accepted', state.trueHash); } catch (_) {}
+        logger.warn(this.alias, '下载器已接受，历史待同步', error.code || 'DB_WRITE_PENDING');
+        return { deferred: 'history', accepted: true };
+      }
+      if (!state.requestStarted || error.notSubmitted) {
+        try {
+          await admission.release(operation);
+          if (['SQLITE_CONSTRAINT_UNIQUE', 'RSS_ALREADY_ADMITTED'].includes(error.code)) return { deferred: 'reserved' };
+          await util.runRecord('INSERT INTO torrents (hash,name,size,rss_id,link,record_time,record_type,record_note) VALUES (?,?,?,?,?,?,?,?)',
+            [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 3, '添加种子失败: 未提交']);
+        } catch (_) {
+          logger.warn(this.alias, '未提交操作的历史待同步');
+        }
+        logger.error(this.alias, '下载器未接受添加', error.code || 'ADD_REJECTED');
+        try { await this.ntf.addTorrentError(this._rss, client, torrent); } catch (_) {}
+        return { failed: true };
+      }
+      try { await admission.mark(operation, 'uncertain', state.trueHash); } catch (_) {}
+      logger.warn(this.alias, '下载器提交结果待核对，不自动重复添加', error.code || 'ADD_OUTCOME_UNKNOWN');
+      return { deferred: 'confirmation' };
+    } finally {
+      admission.end(operation);
+    }
+    try { await this.ntf.addTorrent(this._rss, client, torrent); } catch (_) { logger.warn(this.alias, '添加通知发送失败'); }
+    return { accepted: true };
+  }
+
   async _pushTorrent (torrent, _client) {
     if (this.autoReseed && torrent.hash.indexOf('fakehash') === -1) {
       for (const key of this.reseedClients) {
@@ -213,19 +269,12 @@ class Rss {
           if (+_torrent.size === +torrent.size && +_torrent.completed === +_torrent.size) {
             const bencodeInfo = await rss.getTorrentNameByBencode(torrent.url);
             if (_torrent.name === bencodeInfo.name && _torrent.hash !== bencodeInfo.hash) {
-              try {
-                this.addCount += 1;
-                await client.addTorrent(torrent.url, torrent.hash, true, this.uploadLimit, this.downloadLimit, _torrent.savePath, this.category);
-                await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, category, link, record_time, add_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                  [torrent.hash, torrent.name, torrent.size, this.id, this.category, torrent.link, moment().unix(), moment().unix(), 1, '辅种']);
-                await this.ntf.addTorrent(this._rss, client, torrent);
-                return;
-              } catch (error) {
-                logger.error(this.alias, '下载器', client, '添加种子', torrent.name, '失败\n', error);
-                await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, category, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                  [torrent.hash, torrent.name, torrent.size, this.id, this.category, torrent.link, moment().unix(), 3, '辅种失败']);
-                await this.ntf.addTorrentError(this._rss, client, torrent);
-              }
+              return this._addTracked(torrent, client, this.category, true, async (operation, state) => {
+                state.trueHash = bencodeInfo.hash;
+                await admission.mark(operation, 'submitting', state.trueHash);
+                state.requestStarted = true;
+                await client.addTorrent(torrent.url, torrent.hash, true, this.uploadLimit, this.downloadLimit, _torrent.savePath, this.category, undefined, false, true);
+              });
             }
           }
         }
@@ -344,109 +393,109 @@ class Rss {
       }
       const category = fitRule.category || this.category;
       const client = fitRule.client ? global.runningClient[fitRule.client] : _client;
-      try {
-        let truehash = '';
-        this.addCount += 1;
-        if (this.pushTorrentFile) {
-          const { filepath, hash } = await this._downloadTorrent(torrent.url, torrent.hash);
-          truehash = hash;
-          await client.addTorrentByTorrentFile(filepath, hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused);
+      return this._addTracked(torrent, client, category, false, async (operation, state) => {
+        let url = torrent.url;
+        if (this.useCustomRegex) {
+          const match = this.regexStr.match(/^\/(.*)\/([gimuy]*)$/);
+          if (!match) throw Object.assign(new Error('RSS_REGEX_INVALID'), { code: 'RSS_REGEX_INVALID' });
+          const [, pattern, flags] = match;
+          url = url.replace(new RegExp(pattern, flags), this.replaceStr);
+        }
+        // A GUID can look like a hash without being the torrent infohash.
+        // Resolve qB's real identity before submitting, including URL-mode RSS.
+        if (client._client.type === 'qBittorrent' || this.pushTorrentFile || !admission.isHash(torrent.hash)) {
+          const { filepath, hash } = await this._downloadTorrent(url, !this.useCustomRegex && admission.isHash(torrent.hash) ? torrent.hash : undefined);
+          state.trueHash = hash;
+          await admission.mark(operation, 'submitting', hash);
+          state.requestStarted = true;
+          await client.addTorrentByTorrentFile(filepath, hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, true);
         } else {
-          if (this.useCustomRegex) {
-            const match = this.regexStr.match(/^\/(.*)\/([gimuy]*)$/);
-            if (match) {
-              const [, pattern, flags] = match;
-              const regex = new RegExp(pattern, flags);
-              await client.addTorrent(torrent.url.replace(regex, this.replaceStr), torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused);
-            }
-          } else {
-            await client.addTorrent(torrent.url, torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused);
-          }
+          await admission.mark(operation, 'submitting');
+          state.requestStarted = true;
+          await client.addTorrent(url, torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, true);
         }
-        try {
-          await this.ntf.addTorrent(this._rss, client, torrent);
-        } catch (e) {
-          logger.error('通知信息发送失败: \n', e);
-        }
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, category, record_time, add_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, category, moment().unix(), moment().unix(), 1, '添加种子']);
-        if (truehash && torrent.hash !== truehash) {
-          await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, category, record_time, add_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [truehash, torrent.name, torrent.size, this.id, torrent.link, category, moment().unix(), moment().unix(), 1, '添加种子']);
-        }
-      } catch (error) {
-        logger.error(this.alias, '下载器', client.alias, '添加种子失败:', error.message);
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 3, '添加种子失败']);
-        try {
-          await this.ntf.addTorrentError(this._rss, client, torrent);
-        } catch (e) {
-          logger.error('通知信息发送失败: \n', e);
-        }
-      }
+      });
     }
   }
 
   async rss (_torrents) {
+    if (this.rssBusy) return { skipped: 'overlap' };
+    this.rssBusy = true;
+    try {
+      this._updateHourCount();
+      this.pendingAdmission = await admission.reconcile(this);
+      return await this._rssCycle(_torrents);
+    } finally {
+      this.rssBusy = false;
+    }
+  }
+
+  async _rssCycle (_torrents) {
     let torrents = [];
     if (_torrents) {
       torrents = _torrents;
     } else {
       torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
     }
+    let databaseFailures = 0;
     for (const torrent of torrents) {
-      const availableClients = this.clientArr
-        .map(item => global.runningClient[item])
-        .filter(item => {
-          return !!item && !!item.status && !!item.maindata &&
+      try {
+        const availableClients = this.clientArr
+          .map(item => global.runningClient[item])
+          .filter(item => {
+            return !!item && !!item.status && !!item.maindata &&
             (!this.maxClientUploadSpeed || this.maxClientUploadSpeed > item.avgUploadSpeed) &&
             (!this.maxClientDownloadSpeed || this.maxClientDownloadSpeed > item.avgDownloadSpeed) &&
             (!this.maxClientDownloadCount || this.maxClientDownloadCount > item.maindata.leechingCount);
-        });
-      const firstClient = availableClients
-        .filter(item => {
-          return (!item.maxDownloadSpeed || item.maxDownloadSpeed > item.avgDownloadSpeed) &&
+          });
+        const firstClient = availableClients
+          .filter(item => {
+            return (!item.maxDownloadSpeed || item.maxDownloadSpeed > item.avgDownloadSpeed) &&
             (!item.maxUploadSpeed || item.maxUploadSpeed > item.avgUploadSpeed) &&
             (!item.maxLeechNum || item.maxLeechNum > item.maindata.leechingCount) &&
             (!item.minFreeSpace || item.minFreeSpace < item.maindata.freeSpaceOnDisk);
-        })
-        .sort((a, b) => (this.clientSortBy === 'freeSpaceOnDisk' ? -1 : 1) *
+          })
+          .sort((a, b) => (this.clientSortBy === 'freeSpaceOnDisk' ? -1 : 1) *
           (a.maindata[this.clientSortBy] - b.maindata[this.clientSortBy])
-        )[0] || availableClients[0];
-      const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? AND rss_id = ?', [torrent.hash, this.id]);
-      if (sqlRes && sqlRes.id) continue;
-      if (torrent.name.indexOf('[FROZEN]') !== -1) continue;
-      if (this.addCount >= this.addCountPerHour) {
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, `拒绝原因: 达到单小时推送上限: ${this.addCount} / ${this.addCountPerHour}`]);
-        await this.ntf.rejectTorrent(this._rss, undefined, torrent, `拒绝原因: 达到单小时推送上限: ${this.addCount} / ${this.addCountPerHour}`);
-        return;
-      }
-      if (moment().unix() - this.lastRssTime > +this.maxSleepTime) {
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 最长休眠时间']);
-        await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 最长休眠时间');
-        continue;
-      }
-      if (!firstClient) {
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 无可用下载器']);
-        await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 无可用下载器');
-        logger.error(this.alias, '无可用下载器');
-        continue;
-      }
-      let reject = false;
-      for (const rejectRule of this.rejectRules) {
-        if (this._fitRule(rejectRule, torrent)) {
+          )[0] || availableClients[0];
+        const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? AND rss_id = ? ORDER BY id DESC LIMIT 1', [torrent.hash, this.id]);
+        if (!admission.retryableHistory(sqlRes, moment().unix())) continue;
+        if (torrent.name.indexOf('[FROZEN]') !== -1) continue;
+        if (this.addCountPerHour > 0 && this.addCount >= this.addCountPerHour) {
           await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-            [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, `拒绝规则: ${rejectRule.alias}`]);
-          await this.ntf.rejectTorrent(this._rss, undefined, torrent, `拒绝规则: ${rejectRule.alias}`);
-          reject = true;
-          break;
+            [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, `拒绝原因: 达到单小时推送上限: ${this.addCount} / ${this.addCountPerHour}`]);
+          await this.ntf.rejectTorrent(this._rss, undefined, torrent, `拒绝原因: 达到单小时推送上限: ${this.addCount} / ${this.addCountPerHour}`);
+          return;
         }
-      }
-      if (!reject) {
-        await this._pushTorrent(torrent, firstClient);
+        if (moment().unix() - this.lastRssTime > +this.maxSleepTime) {
+          await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
+            [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 最长休眠时间']);
+          await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 最长休眠时间');
+          continue;
+        }
+        if (!firstClient) {
+          await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
+            [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 无可用下载器']);
+          await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 无可用下载器');
+          logger.error(this.alias, '无可用下载器');
+          continue;
+        }
+        let reject = false;
+        for (const rejectRule of this.rejectRules) {
+          if (this._fitRule(rejectRule, torrent)) {
+            await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
+              [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, `拒绝规则: ${rejectRule.alias}`]);
+            await this.ntf.rejectTorrent(this._rss, undefined, torrent, `拒绝规则: ${rejectRule.alias}`);
+            reject = true;
+            break;
+          }
+        }
+        if (!reject) {
+          await this._pushTorrent(torrent, firstClient);
+        }
+      } catch (error) {
+        logger.error(this.alias, 'RSS候选处理失败', error.code || 'RSS_ITEM_FAILED');
+        if (/^(?:DB_|SQLITE_)/.test(error.code || '') && ++databaseFailures >= 3) break;
       }
     }
     this.lastRssTime = moment().unix();

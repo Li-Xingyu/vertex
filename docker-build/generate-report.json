@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-04T20:17:48+08:00",
+  "phase": "generate",
+  "files_generated": [
+    {"path": "docker/Dockerfile.reliability", "description": "Pinned-runtime backend extension image"},
+    {"path": ".dockerignore", "description": "Exclude local state and sensitive build context"},
+    {"path": "docs/reliability.md", "description": "Behavior, tests, delivery and cutover boundaries"}
+  ],
+  "template_used": "nodejs-express.dockerfile (reviewed; adapted to official existing runtime)",
+  "key_decisions": [
+    {"decision": "pinned_official_runtime", "rationale": "Keep the official Redis, native SQLite, Chromium, entrypoint and compiled UI compatible"},
+    {"decision": "preserve_bootstrap_identity", "rationale": "Official bootstrap needs root for ownership and UID/GID setup; Node then uses the configurable vt account. Do not silently break existing PUID/PGID semantics"},
+    {"decision": "no_new_compose", "rationale": "SQLite and Redis are already embedded in the official container; no new external service is required"},
+    {"decision": "no_generated_env_secrets", "rationale": "No build-time credentials are required; fresh isolated tests use official first-run initialization"}
+  ],
+  "exposed_port": 3000,
+  "env_vars": {"runtime_required": [], "runtime_optional": ["TZ", "PORT", "PUID", "PGID", "REDISPORT"]},
+  "validation_checklist": {"fixed_base_image_version": true, "multi_stage_build": false, "non_root_user": false, "expose_matches_detected_port": true, "healthcheck_present": true, "dockerignore_excludes_sensitive": true},
+  "exceptions": ["No source compilation or dependency install is required for this backend-only extension", "Preserve official root bootstrap and configurable process UID instead of replacing its entrypoint"]
+}

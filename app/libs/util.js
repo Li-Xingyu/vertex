@@ -7,7 +7,7 @@ const md5 = require('md5-node');
 const CryptoJS = require('crypto-js');
 const cron = require('node-cron');
 const request = require('request');
-const Database = require('better-sqlite3');
+const database = require('./database');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const url = require('url');
@@ -18,7 +18,6 @@ const redlock = require('./redlock');
 const logger = require('./logger');
 const scrape = require('./scrape');
 
-const db = new Database(path.join(__dirname, '../db/sql.db'));
 puppeteer.use(StealthPlugin());
 
 let browser;
@@ -31,38 +30,23 @@ for (const k of Object.keys(util)) {
 
 exports.redlock = redlock;
 
-exports.getRecords = async function (sql, options = []) {
-  let _sql = sql;
-  if (options) {
-    options.forEach((item) => {
-      _sql = _sql.replace(/\?/, item);
-    });
-  }
-  logger.debug('Get Records:', _sql);
-  return db.prepare(sql).all(...options);
+exports.getRecords = async function (sql, options = [], scheduling = {}) {
+  return database.request('all', sql, options, scheduling);
 };
 
-exports.runRecord = async function (sql, options = []) {
-  let _sql = sql;
-  if (options) {
-    options.forEach((item) => {
-      _sql = _sql.replace(/\?/, item);
-    });
-  }
-  logger.debug('Run Record:', _sql);
-  return db.prepare(sql).run(...options);
+exports.runRecord = async function (sql, options = [], scheduling = {}) {
+  return database.request('run', sql, options, scheduling);
 };
 
-exports.getRecord = async function (sql, options = []) {
-  let _sql = sql;
-  if (options) {
-    options.forEach((item) => {
-      _sql = _sql.replace(/\?/, item);
-    });
-  }
-  logger.debug('Get Record:', _sql);
-  return db.prepare(sql).get(...options);
+exports.getRecord = async function (sql, options = [], scheduling = {}) {
+  return database.request('get', sql, options, scheduling);
 };
+
+exports.runRecords = async function (operations, scheduling = {}) {
+  return database.request('batch', null, operations, scheduling);
+};
+
+exports.getDatabaseStats = () => database.getStats();
 
 const _importJson = function (path) {
   const jsonString = fs.readFileSync(path, { encoding: 'utf-8' });

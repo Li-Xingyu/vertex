@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-04T20:17:48+08:00",
+  "phase": "analysis",
+  "project": {"language": "javascript", "framework": "express", "package_manager": "npm"},
+  "package_manager_config": {"lockfile_disabled": false, "install_command": "reuse pinned installed runtime dependencies"},
+  "workspace": {"enabled": false, "packages": ["backend", "Vue CLI webui"], "package_count": 2},
+  "build": {"command": "docker buildx build --platform linux/amd64 --load -f docker/Dockerfile.reliability", "standalone_mode": false, "env_required": []},
+  "run": {"entry_point": "docker/start.sh", "command": "bash /app/vertex/docker/start.sh", "port": 3000, "env_required": []},
+  "external_services": {"database": {"type": "sqlite", "embedded": true}, "redis": {"required": true, "embedded": true}, "s3": {"required": false}, "search": {"type": "none"}, "message_queue": {"type": "none"}},
+  "system_libs": [{"npm_package": "better-sqlite3", "handling": "retain native module from pinned official runtime"}, {"component": "Chromium/Xvfb", "handling": "retain official image binaries"}],
+  "migration_system": {"detected": true, "orm": "none", "migration_count": 1, "execution_timing": "worker initialization", "execution_command": "additive pending-operation table and index"},
+  "build_complexity": {"memory_risk": "low", "heavy_operations": [], "skipped_commands": ["unchanged frontend build; reuse compiled official UI"]},
+  "custom_cli": {"detected": false},
+  "native_modules": {"rust_required": false, "sqlite_native_module": true},
+  "complexity": "L2",
+  "max_iterations": 3,
+  "existing_docker": {"has_dockerfile": true, "has_compose": false, "has_dockerignore": false},
+  "warnings": ["Node 14 is retained for compatibility; dependency modernization is a separate change", "Production hooks and FUSE are not covered by isolated tests"],
+  "detection_steps_completed": 17
+}

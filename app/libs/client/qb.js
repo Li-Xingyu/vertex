@@ -156,6 +156,20 @@ exports.addTorrentTag = async function (clientUrl, cookie, hash, tag) {
   return res;
 };
 
+exports.hasTorrent = async function (clientUrl, cookie, hash) {
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(hash)) return false;
+  const res = await util.requestPromise({
+    url: clientUrl + '/api/v2/torrents/info?hashes=' + encodeURIComponent(hash),
+    method: 'GET',
+    headers: { cookie },
+    timeout: 10000
+  }, false);
+  if (res.statusCode !== 200) throw new Error('QB_CONFIRM_UNAVAILABLE');
+  const rows = typeof res.body === 'string' ? JSON.parse(res.body) : res.body;
+  if (!Array.isArray(rows)) throw new Error('QB_CONFIRM_INVALID');
+  return rows.some(torrent => (torrent.hash || '').toLowerCase() === hash.toLowerCase());
+};
+
 exports.deleteTorrent = async function (clientUrl, cookie, hash, isDeleteFiles) {
   await exports.pauseTorrent(clientUrl, cookie, hash);
   const message = {
