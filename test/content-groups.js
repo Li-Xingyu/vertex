@@ -168,11 +168,10 @@ async function main () {
     assert.equal(next.state.report.summary.groups, 1);
     assert(next.state.report.groups[0].reasons.includes('stale_manifest'));
   });
-  await test('IYUU proof requires matching current instance, manifest and proof type', async () => {
+  await test('IYUU proof requires matching current instance and manifest digest', async () => {
     const a = fixture(0); const b = fixture(1);
     const record = {
       schema: 1,
-      proofType: 'iyuu-v1-complete-readback',
       clientId: 'brush',
       verifiedAt: 200,
       contentId: a.proof.contentId,
@@ -180,7 +179,7 @@ async function main () {
       members: [a.proof.binding, b.proof.binding]
     };
     assert(R.lineageProof(record, b.row, b.files, 'brush', 300));
-    assert.equal(R.lineageProof({ ...record, proofType: 'Success' }, b.row, b.files, 'brush', 300), null);
+    assert.equal(R.lineageProof({ ...record, manifestDigest: null }, b.row, b.files, 'brush', 300), null);
     assert.equal(R.lineageProof(record, { ...b.row, added_on: 201 }, b.files, 'brush', 300), null);
     const { state, counts } = await fakeCollect([b], undefined, {}, { [b.row.hash]: record });
     assert.equal(counts.export, 0); assert.equal(state.report.lineageHits, 1);

@@ -63,7 +63,7 @@ function sameInstance (a, b, clientId) {
 }
 
 function lineageProof (record, row, files, clientId, now) {
-  if (!record || record.schema !== 1 || record.proofType !== 'iyuu-v1-complete-readback' || record.clientId !== clientId ||
+  if (!record || record.schema !== 1 || record.clientId !== clientId ||
       !Number.isSafeInteger(record.verifiedAt) || record.verifiedAt > now + 30 || record.verifiedAt <= 0 ||
       !Array.isArray(record.members) || record.members.length !== 2 || record.members[0].hash === record.members[1].hash) return null;
   const b = record.members.find(b => b.hash === row.hash);

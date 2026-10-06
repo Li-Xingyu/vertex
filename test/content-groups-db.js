@@ -9,7 +9,6 @@ async function test (name, fn) { await fn(); count++; process.stdout.write('PASS
 function relation (target = '2', added = 100) {
   return {
     schema: 1,
-    proofType: 'iyuu-v1-complete-readback',
     clientId: 'brush',
     verifiedAt: 200,
     contentId: 'b882dffb6e7e23354a760b937960418bd4b68a5f7d08e7201bce727ac386395a',
@@ -59,6 +58,37 @@ function rows (r) {
   }));
 }
 async function main () {
+  await test('reconciled history uses the same stream without claiming live completion', async () => {
+    const r = relation();
+    const f = fake([event(r)]); const ev = await L.readEvents({}, 'brush', {}, f.connect);
+    assert.equal(Object.prototype.hasOwnProperty.call(ev.state.records[r.members[1].hash], 'proofType'), false);
+    const t = rows(r).map(row => ({ ...row, state: 'downloading', amount_left: 2 }));
+    const index = L.byMember(ev.state);
+    const out = await R.collect({ clientId: 'brush', roots: ['/downloads'], incremental: true, priorityHashes: ev.priority }, async action => {
+      if (action === 'info') return t;
+      assert.equal(action, 'files'); return [{ index: 0, name: 'fixture/a.bin', size: 4, priority: 1 }];
+    }, {}, async h => index.get(h));
+    assert.equal(out.report.summary.multiReferenceGroups, 1);
+    assert.equal(out.report.lineageHits, 2);
+    assert.equal(out.report.safety.deleteAuthorized, false);
+    assert.equal(out.report.safety.pauses, 0);
+    assert.equal(out.report.safety.deletions, 0);
+    assert.equal(out.cache[t[0].hash].row.amount_left, 2);
+  });
+  await test('history proof cannot upgrade changed instances or a fake singleton', () => {
+    const r = relation();
+    const t = rows(r)[0]; const files = [{ index: 0, name: 'fixture/a.bin', size: 4, priority: 1 }];
+    assert.equal(R.lineageProof(r, { ...t, added_on: 101 }, files, 'brush', 300), null);
+    assert.equal(R.lineageProof(r, { ...t, state: 'checkingUP' }, files, 'brush', 300), null);
+    assert.equal(R.lineageProof(r, t, [{ ...files[0], name: 'different.bin' }], 'brush', 300), null);
+    assert.throws(() => L.record(JSON.stringify({ ...r, members: [r.members[0]] }), 'brush'));
+    assert.throws(() => L.record(JSON.stringify({ ...r, members: [r.members[0], r.members[0]] }), 'brush'));
+    assert.throws(() => L.record(JSON.stringify({ ...r, contentId: null }), 'brush'));
+  });
+  await test('legacy annotations are ignored, not a verification condition', () => {
+    assert.deepEqual(L.record(JSON.stringify({ ...relation(), proofType: 'iyuu-v1-complete-readback' }), 'brush'), relation());
+    assert.deepEqual(L.record(JSON.stringify({ ...relation(), proofType: 'unused', extraField: 'not cached' }), 'brush'), relation());
+  });
   await test('DB stream reads only explicit tables and prioritizes both members', async () => {
     const f = fake([event(relation())]); const out = await L.readEvents({}, 'brush', {}, f.connect);
     assert.equal(out.state.cursor, '1'); assert.equal(out.priority.length, 2); assert.equal(f.destroyed, 1);
@@ -80,7 +110,7 @@ async function main () {
   });
   await test('bad payload, other client and digest mismatch reject entire page', async () => {
     const good = event(relation());
-    for (const bad of [{ ...good, record_sha256: '0'.repeat(64) }, event({ ...relation(), clientId: 'main' }), event({ ...relation(), proofType: 'Success' })]) {
+    for (const bad of [{ ...good, record_sha256: '0'.repeat(64) }, event({ ...relation(), clientId: 'main' }), event({ ...relation(), manifestDigest: null })]) {
       const f = fake([bad]); await assert.rejects(() => L.readEvents({}, 'brush', {}, f.connect), /CG_LINEAGE_/); assert.equal(f.destroyed, 1);
     }
   });

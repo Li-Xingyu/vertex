@@ -10,7 +10,7 @@ function id (value) {
 function record (raw, clientId) {
   if (typeof raw !== 'string' || Buffer.byteLength(raw) > 65536) fail('SIZE');
   let r; try { r = JSON.parse(raw); } catch (_) { fail('JSON'); }
-  if (!r || r.schema !== 1 || r.proofType !== 'iyuu-v1-complete-readback' || r.clientId !== clientId ||
+  if (!r || r.schema !== 1 || r.clientId !== clientId ||
       !Number.isSafeInteger(r.verifiedAt) || r.verifiedAt < 1 || r.verifiedAt > Math.floor(Date.now() / 1000) + 30 ||
       !/^[a-f0-9]{64}$/.test(r.contentId) || !/^[a-f0-9]{64}$/.test(r.manifestDigest) || !Array.isArray(r.members) || r.members.length !== 2) fail('RECORD');
   const members = r.members.map(b => {
@@ -21,7 +21,6 @@ function record (raw, clientId) {
   // Explicit whitelist: never cache arbitrary database fields or credentials.
   return {
     schema: 1,
-    proofType: r.proofType,
     clientId,
     verifiedAt: r.verifiedAt,
     contentId: r.contentId,
