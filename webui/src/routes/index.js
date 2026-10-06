@@ -21,6 +21,7 @@ import RuleRss from '@/pages/rule/Rss';
 import RuleSelect from '@/pages/rule/Select';
 
 import TaskRss from '@/pages/task/Rss';
+import TaskProvider from '@/pages/task/Provider';
 import TaskSubscribe from '@/pages/task/Subscribe';
 import TaskLink from '@/pages/task/Link';
 import TaskBulkLink from '@/pages/task/BulkLink';
@@ -277,6 +278,10 @@ const task = {
       meta: {
         title: 'Rss 任务 - 任务配置'
       }
+    }, {
+      path: 'provider',
+      component: TaskProvider,
+      meta: { title: '站点采集 - 任务配置' }
     }, {
       path: 'subscribe',
       component: TaskSubscribe,

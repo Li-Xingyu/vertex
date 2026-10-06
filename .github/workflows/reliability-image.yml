@@ -23,14 +23,17 @@ jobs:
       - name: Build from pinned official runtime
         run: docker buildx build --platform linux/amd64 --load -f docker/Dockerfile.reliability --build-arg VERTEX_REVISION="$GITHUB_SHA" -t "$IMAGE:$TAG" .
       - name: Real SQLite and RSS regression tests
-        run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=128m --entrypoint node "$IMAGE:$TAG" test/reliability.js
+        run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=256m --entrypoint node "$IMAGE:$TAG" test/reliability.js
+      - name: Provider parsing, ownership and persistence regressions
+        run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=128m --entrypoint node "$IMAGE:$TAG" test/providers.js
       - name: Lint changed application modules
-        run: docker run --rm --network none --read-only --entrypoint ./node_modules/.bin/eslint "$IMAGE:$TAG" app/libs/database.js app/libs/database-worker.js app/libs/rss-admission.js app/libs/util.js app/libs/client/qb.js app/common/Client.js app/common/Rss.js test
+        run: docker run --rm --network none --read-only --entrypoint ./node_modules/.bin/eslint "$IMAGE:$TAG" app/libs/database.js app/libs/database-worker.js app/libs/rss-admission.js app/libs/util.js app/libs/client/qb.js app/libs/provider-*.js app/libs/torrent-providers.js app/controller/Provider.js app/common/Client.js app/common/Rss.js test
       - name: Fresh isolated application startup
         run: |
           trap 'docker rm -f vertex-reliability-smoke >/dev/null 2>&1 || true' EXIT
           docker run -d --name vertex-reliability-smoke --network none --tmpfs /vertex:rw,nosuid,size=128m -e TZ=Asia/Shanghai "$IMAGE:$TAG"
           docker exec vertex-reliability-smoke node test/startup-smoke.js
+          docker exec vertex-reliability-smoke node test/provider-ui-smoke.js
       - name: Login to own GHCR namespace
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}

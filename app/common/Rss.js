@@ -10,6 +10,7 @@ const path = require('path');
 const moment = require('moment');
 const Push = require('./Push');
 const admission = require('../libs/rss-admission');
+const providers = require('../libs/torrent-providers');
 
 class Rss {
   constructor (rss) {
@@ -325,7 +326,9 @@ class Rss {
         await this.ntf.rejectTorrent(this._rss, _client, torrent, '拒绝原因: 不符合所有规则');
         return;
       }
-      if (this.scrapeFree) {
+      if (this.scrapeFree && providers.metadata(torrent) && torrent.downloadFactor !== 0) return;
+      if (this.scrapeHr && providers.metadata(torrent) && torrent.hrState !== 'exempt') return;
+      if (this.scrapeFree && !providers.metadata(torrent)) {
         try {
           if (!await util.scrapeFree(torrent.link, this.cookie)) {
             const isScraped = await redis.get(`vertex:scrape:free:${torrent.hash}`);
@@ -347,7 +350,7 @@ class Rss {
           return;
         }
       }
-      if (this.scrapeHr) {
+      if (this.scrapeHr && !providers.metadata(torrent)) {
         try {
           if (await util.scrapeHr(torrent.link, this.cookie)) {
             await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -393,7 +396,9 @@ class Rss {
       }
       const category = fitRule.category || this.category;
       const client = fitRule.client ? global.runningClient[fitRule.client] : _client;
+      await providers.finalCheck(this, torrent, client);
       return this._addTracked(torrent, client, category, false, async (operation, state) => {
+        await providers.finalCheck(this, torrent, client);
         let url = torrent.url;
         if (this.useCustomRegex) {
           const match = this.regexStr.match(/^\/(.*)\/([gimuy]*)$/);
@@ -404,7 +409,7 @@ class Rss {
         // A GUID can look like a hash without being the torrent infohash.
         // Resolve qB's real identity before submitting, including URL-mode RSS.
         if (client._client.type === 'qBittorrent' || this.pushTorrentFile || !admission.isHash(torrent.hash)) {
-          const { filepath, hash } = await this._downloadTorrent(url, !this.useCustomRegex && admission.isHash(torrent.hash) ? torrent.hash : undefined);
+          const { filepath, hash } = providers.metadata(torrent) || await this._downloadTorrent(url, !this.useCustomRegex && admission.isHash(torrent.hash) ? torrent.hash : undefined);
           state.trueHash = hash;
           await admission.mark(operation, 'submitting', hash);
           state.requestStarted = true;
@@ -432,7 +437,10 @@ class Rss {
 
   async _rssCycle (_torrents) {
     let torrents = [];
-    if (_torrents) {
+    const source = await providers.begin(this, _torrents);
+    if (source) {
+      torrents = source.candidates;
+    } else if (_torrents) {
       torrents = _torrents;
     } else {
       torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
@@ -480,6 +488,9 @@ class Rss {
           logger.error(this.alias, '无可用下载器');
           continue;
         }
+        // List sizes are rounded. Resolve exact metadata BEFORE final rules,
+        // native reservations and submission; preview never enters this path.
+        if (source && !await providers.prepare(this, torrent, firstClient)) continue;
         let reject = false;
         for (const rejectRule of this.rejectRules) {
           if (this._fitRule(rejectRule, torrent)) {

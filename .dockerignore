@@ -1,6 +1,9 @@
 .git
 node_modules
 webui/node_modules
+webui/dist
+webui/public/assets/styles
+app/static
 app/data
 app/db
 logs

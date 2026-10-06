@@ -196,6 +196,12 @@ module.exports = function (app, express, router) {
   router.post('/watch/deleteRecord', ctrl.Watch.deleteRecord);
 
   router.get('/rss/list', ctrl.Rss.list);
+  router.get('/provider/list', ctrl.Provider.list);
+  router.get('/provider/defaults', ctrl.Provider.defaults);
+  router.post('/provider/validate', ctrl.Provider.validate);
+  router.post('/provider/apply', ctrl.Provider.apply);
+  router.post('/provider/preview', ctrl.Provider.preview);
+  router.post('/provider/suspend', ctrl.Provider.suspend);
   router.post('/rss/add', ctrl.Rss.add);
   router.post('/rss/dryrun', ctrl.Rss.dryrun);
   router.post('/rss/modify', ctrl.Rss.modify);

@@ -93,6 +93,7 @@ async function scenario (options = {}) {
     '../libs/logger': logger,
     '../libs/redis': redis,
     '../libs/rss-admission': admission,
+    '../libs/torrent-providers': options.provider || { begin: async () => null, metadata: () => null, finalCheck: async () => {} },
     '../libs/rss': {},
     '../libs/client/qb': {},
     '../libs/client/de': {},
@@ -406,6 +407,27 @@ async function main () {
     await Promise.all([f.client.record(), f.client.record()]);
     assert.equal((await f.util.getRecord('SELECT count(*) AS n FROM torrent_flow')).n, 100);
     assert.equal(f.client.recordInProgress, false);
+  });
+  await test('provider exact size reaches final RSS rules and native reservation before one file submit', async () => {
+    const t = torrent(901); t.hash = 'provider:CARPT:901'; t.size = 100;
+    const hash = '9'.repeat(40); let prepared = false; let finalChecks = 0; let accepts = 0;
+    const provider = {
+      begin: async () => ({ candidates: [t] }),
+      prepare: async (r, row) => { row.hash = hash; row.size = 123456; prepared = true; return true; },
+      metadata: () => ({ hash, filepath: '/tmp/' + hash + '.torrent' }),
+      finalCheck: async () => { assert(prepared); finalChecks++; }
+    };
+    const f = await scenario({ provider }); const r = f.makeRss();
+    r.acceptRules = [{}]; r._fitRule = (rule, row) => { assert(prepared); assert.equal(row.size, 123456); accepts++; return true; };
+    r._downloadTorrent = async () => assert.fail('metadata must not be downloaded twice');
+    await r.rss();
+    assert.equal(f.posted.length, 1); assert.equal(f.posted[0], hash); assert.equal(accepts, 1); assert.equal(finalChecks, 2);
+    const saved = await f.util.getRecord('SELECT * FROM torrents WHERE record_type=1'); assert.equal(saved.size, 123456);
+  });
+  await test('provider preflight refusal cannot reserve or post a torrent', async () => {
+    const provider = { begin: async () => ({ candidates: [torrent(902)] }), prepare: async () => false };
+    const f = await scenario({ provider }); await f.makeRss().rss();
+    assert.equal(f.posted.length, 0); assert.equal((await f.util.getRecord('SELECT count(*) AS n FROM vertex_rss_pending')).n, 0);
   });
   process.stdout.write(JSON.stringify({
     ok: true,

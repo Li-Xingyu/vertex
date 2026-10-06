@@ -88,6 +88,10 @@ class UserMod {
           path: '/task/rss',
           icon: ['fas', 'rss']
         }, {
+          title: '站点采集',
+          path: '/task/provider',
+          icon: ['fas', 'list-check']
+        }, {
           title: '订阅任务',
           path: '/task/subscribe',
           icon: ['fas', 'calendar-check']
