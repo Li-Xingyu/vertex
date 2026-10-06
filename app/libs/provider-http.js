@@ -2,6 +2,7 @@
 const https = require('https');
 const dns = require('dns').promises;
 const net = require('net');
+const zlib = require('zlib');
 const { fail } = require('./provider-schema');
 
 function retryAfter (value, now = Date.now()) {
@@ -28,18 +29,38 @@ async function request (url, origin, credential, maxBytes = 8 * 1024 ** 2) {
   if (!addresses.length || addresses.some(a => !publicAddress(a.address))) fail('PROVIDER_PRIVATE_ADDRESS');
   const ip = addresses[0];
   return new Promise((resolve, reject) => {
-    const headers = { 'User-Agent': 'Mozilla/5.0 Vertex list provider', 'Accept-Encoding': 'identity' };
+    const headers = { 'User-Agent': 'Mozilla/5.0 Vertex list provider', 'Accept-Encoding': 'gzip, identity' };
     if (credential) headers.Cookie = credential;
-    let done = false;
-    const finish = (error, value, retryAfterSeconds = 0) => { if (done) return; done = true; clearTimeout(deadline); if (error) reject(Object.assign(new Error(error), { code: error, retryAfterSeconds })); else resolve(value); };
+    let done = false; let decoder;
+    const finish = (error, value, retryAfterSeconds = 0) => {
+      if (done) return;
+      done = true; clearTimeout(deadline);
+      if (error) {
+        if (decoder) decoder.destroy();
+        q.destroy();
+        reject(Object.assign(new Error(error), { code: error, retryAfterSeconds }));
+      } else resolve(value);
+    };
     const q = https.get(u, { headers, lookup: (host, options, cb) => cb(null, ip.address, ip.family), timeout: 15000 }, r => {
-      if (r.statusCode !== 200 || (r.headers['content-encoding'] && r.headers['content-encoding'] !== 'identity')) {
+      const encoding = String(r.headers['content-encoding'] || 'identity').trim().toLowerCase();
+      if (r.statusCode !== 200) {
         r.resume(); const e = r.statusCode === 429 ? 'PROVIDER_RATE_LIMIT' : r.statusCode === 401 || r.statusCode === 403 || (r.statusCode >= 300 && r.statusCode < 400) ? 'PROVIDER_AUTH_OR_REDIRECT' : 'PROVIDER_HTTP';
         finish(e, null, r.statusCode === 429 || r.statusCode === 503 ? retryAfter(r.headers['retry-after']) : 0); q.destroy(); return;
       }
-      const chunks = []; let bytes = 0;
-      r.on('data', chunk => { bytes += chunk.length; if (bytes > maxBytes) { finish('PROVIDER_BODY_LIMIT'); q.destroy(); } else chunks.push(chunk); });
-      r.on('end', () => finish(null, Buffer.concat(chunks)));
+      if (!['identity', 'gzip'].includes(encoding)) { r.resume(); finish('PROVIDER_ENCODING'); return; }
+      const chunks = []; let wireBytes = 0; let decodedBytes = 0;
+      // Bound both transfer and decompressed content; never synchronously
+      // inflate an untrusted response or resolve a partial gzip stream.
+      r.on('data', chunk => { wireBytes += chunk.length; if (wireBytes > maxBytes) finish('PROVIDER_BODY_LIMIT'); });
+      const body = encoding === 'gzip' ? (decoder = zlib.createGunzip()) : r;
+      body.on('data', chunk => {
+        if (done) return;
+        decodedBytes += chunk.length;
+        if (decodedBytes > maxBytes) finish('PROVIDER_BODY_LIMIT');
+        else chunks.push(chunk);
+      });
+      body.on('end', () => finish(null, Buffer.concat(chunks)));
+      if (decoder) { decoder.on('error', () => finish('PROVIDER_ENCODING')); r.pipe(decoder); }
       r.on('aborted', () => finish('PROVIDER_NETWORK')); r.on('error', () => finish('PROVIDER_NETWORK'));
     });
     const deadline = setTimeout(() => { finish('PROVIDER_TIMEOUT'); q.destroy(); }, 20000);

@@ -26,6 +26,8 @@ jobs:
         run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=256m --entrypoint node "$IMAGE:$TAG" test/reliability.js
       - name: Provider parsing, ownership and persistence regressions
         run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=128m --entrypoint node "$IMAGE:$TAG" test/providers.js
+      - name: Bounded provider transport regressions
+        run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/provider-http.js
       - name: Lint changed application modules
         run: docker run --rm --network none --read-only --entrypoint ./node_modules/.bin/eslint "$IMAGE:$TAG" app/libs/database.js app/libs/database-worker.js app/libs/rss-admission.js app/libs/util.js app/libs/client/qb.js app/libs/provider-*.js app/libs/torrent-providers.js app/controller/Provider.js app/common/Client.js app/common/Rss.js test
       - name: Fresh isolated application startup

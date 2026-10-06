@@ -203,6 +203,15 @@ async function runtimeTests () {
     const preview = await service.preview(cfg); assert.equal(requests, 1); assert.equal(qbCalls, 0);
     assert.equal(preview.candidates.length, 1); assert(!JSON.stringify(preview).includes('never-output')); assert(!JSON.stringify(preview).includes('download.php'));
   });
+  await test('internal shadow observes one budgeted list without RSS or download side effects', async () => {
+    const before = requests; let observed = 0;
+    const result = await service.fetchList(cfg, true, response => {
+      observed++; assert(response.text.includes('Fixture 12')); assert.equal(new URL(response.url).pathname, '/torrents.php');
+    });
+    assert.equal(observed, 1); assert.equal(requests - before, 1); assert.equal(qbCalls, 0);
+    assert(!JSON.stringify(result).includes('<table')); assert.equal((await service.store.list()).length, 0);
+    await assert.rejects(() => service.fetchList(cfg, true, {}), /PROVIDER_OBSERVER_INVALID/);
+  });
   await test('legacy governed production cannot activate without an explicit migration bridge', async () => {
     await service.store.save(cfg, 0); const preview = await service.preview(cfg); globals.codexGovernanceStartup = { version: 1 };
     await assert.rejects(() => service.activate({ id: cfg.rssId, expectedRevision: 1, target: 1, token: preview.token }), /PROVIDER_GOVERNANCE_MIGRATION_REQUIRED/);

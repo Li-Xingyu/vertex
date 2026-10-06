@@ -62,7 +62,8 @@ async function consume (c, kind) {
     await fs.rename(tmp, file);
   });
 }
-async function fetchList (c, preview = false) {
+async function fetchList (c, preview = false, observe) {
+  if (observe !== undefined && typeof observe !== 'function') fail('PROVIDER_OBSERVER_INVALID');
   const p = profiles[c.profile]; const owner = bridge(c);
   if (Date.now() < (backoffUntil.get(c.profile) || 0)) fail('PROVIDER_RATE_LIMIT');
   if (busy.has(c.profile) || networking >= 3) fail('PROVIDER_BUSY');
@@ -84,6 +85,9 @@ async function fetchList (c, preview = false) {
       await consume(c, 'list');
       const text = (await transport.request(u.toString(), p.origin, cookie)).toString('utf8');
       const result = parser.parse(text, c, p); coverage.push(result.coverage);
+      // Private migration tooling compares the same budgeted response. Raw
+      // bodies are never added to API results or persisted candidate records.
+      if (observe) observe({ text, url: u.toString() });
       for (const row of result.candidates) {
         const old = all.get(row.candidateKey);
         if (old && ['downloadFactor', 'uploadFactor', 'downloadUntil', 'uploadUntil', 'downloadUnlimited', 'uploadUnlimited', 'hrState', 'size'].some(k => old[k] !== row[k])) old.conflict = true;
