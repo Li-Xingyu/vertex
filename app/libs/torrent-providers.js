@@ -74,16 +74,26 @@ async function fetchList (c, preview = false, observe) {
       // The MT bridge must reuse its existing ledger. Preview uses search only.
       return parser.parse(await owner.list(c, { preview, charge: () => consume(c, 'list') }), c, p);
     }
+    const start = Date.now(); const t = c.listTimeouts;
+    const remainingCycle = () => {
+      const ms = (t ? t.cycleSeconds * 1000 : 25000) - (Date.now() - start);
+      if (ms <= 0) fail('PROVIDER_CYCLE_DEADLINE');
+      return ms;
+    };
     const cookie = await credential(c); const all = new Map(); const coverage = [];
-    const start = Date.now(); let next = null;
+    let next = null;
     for (let page = 0; page < (preview ? 1 : c.pages); page++) {
       if (page && !next) break;
-      if (Date.now() - start > 25000) fail('PROVIDER_CYCLE_DEADLINE');
+      remainingCycle();
       const u = new URL(p.listPath, p.origin);
       for (const [k, v] of Object.entries(c.params)) u.searchParams.set(k, v);
       if (page) u.searchParams.set('page', page);
       await consume(c, 'list');
-      const text = (await transport.request(u.toString(), p.origin, cookie)).toString('utf8');
+      const options = t
+        ? { connectTimeoutMs: t.connectSeconds * 1000, dnsTimeoutMs: t.connectSeconds * 1000, idleTimeoutMs: t.readSeconds * 1000, totalTimeoutMs: Math.min(t.requestSeconds * 1000, remainingCycle()) }
+        : { totalTimeoutMs: Math.min(20000, remainingCycle()) };
+      const text = (await transport.request(u.toString(), p.origin, cookie, undefined, options)).toString('utf8');
+      remainingCycle();
       const result = parser.parse(text, c, p); coverage.push(result.coverage);
       // Private migration tooling compares the same budgeted response. Raw
       // bodies are never added to API results or persisted candidate records.
@@ -98,6 +108,7 @@ async function fetchList (c, preview = false, observe) {
       const { JSDOM } = require('jsdom'); const dom = new JSDOM(text);
       try { next = [...dom.window.document.querySelectorAll('a[href]')].some(a => { try { const v = new URL(a.getAttribute('href'), p.origin); return v.origin === p.origin && v.pathname === p.listPath && v.searchParams.get('page') === String(page + 1); } catch (_) { return false; } }); } finally { dom.window.close(); }
       if (all.size > 500) fail('PROVIDER_CANDIDATE_LIMIT');
+      remainingCycle();
     }
     return { candidates: [...all.values()], coverage: { pages: coverage, scope: 'configured-pages-only', morePagesObserved: !!next } };
   } catch (e) {
@@ -113,7 +124,7 @@ function checkCss (c) {
   if (profiles[c.profile].adapter === 'mteam-api') return;
   const { JSDOM } = require('jsdom'); const dom = new JSDOM('<table><tr><td></td></tr></table>');
   try {
-    const selectors = [c.mapping.rows, c.mapping.authenticated, ...Object.values(c.mapping.fields).flatMap(f => [f.selector, f.header]), ...c.promotionRules.map(r => r.selector), ...c.hrRules.map(r => r.selector)];
+    const selectors = [c.mapping.rows, c.mapping.authenticated, ...Object.values(c.mapping.fields).flatMap(f => [f.selector, f.header]), ...c.promotionRules.map(r => r.selector), ...c.hrRules.map(r => r.selector), ...(c.hrAbsence ? c.hrAbsence.rowSelectors : [])];
     for (const selector of selectors.filter(Boolean)) dom.window.document.querySelector(selector);
   } catch (_) { fail('PROVIDER_SELECTOR_INVALID'); } finally { dom.window.close(); }
 }
@@ -168,6 +179,9 @@ async function begin (rss, supplied) {
   s.lastAttempt = now; s.nextAttempt = now + c.intervalSeconds * 1000;
   try {
     const result = await fetchList(c);
+    // Reconcile lifecycle signals before filtering out newly required HR rows.
+    // Preview/shadow fetches never call this production observer.
+    if (bridge(c) && bridge(c).observe) await bridge(c).observe(c, result.candidates);
     s.lastSuccess = Date.now(); s.error = null; s.failures = 0; s.candidates = result.candidates.length;
     s.observations = result.candidates.slice(0, 100).map(row => summary(row, c));
     s.coverage = result.coverage;

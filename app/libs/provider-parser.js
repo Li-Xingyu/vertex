@@ -34,7 +34,7 @@ function url (v, profile, kind) {
     return u.toString();
   } catch (_) { return null; }
 }
-function readHtml (row, m) {
+function readHtml (row, m, offset) {
   if (m.format === 'boolean') return !!m.selector && !!row.querySelector(m.selector);
   let scope = row;
   if (m.header) {
@@ -46,6 +46,13 @@ function readHtml (row, m) {
     scope = row.cells[index];
   }
   const matches = m.selector ? [...scope.querySelectorAll(m.selector)] : [scope];
+  if (m.format === 'date') {
+    // A configured date selector can match tooltips as well as timestamps.
+    // Accept only one distinct valid timestamp; never take the favourable
+    // first value when promotion dates disagree.
+    const dates = matches.map(e => epoch(m.attribute ? e.getAttribute(m.attribute) : e.textContent.trim(), offset)).filter(v => v !== null);
+    return consistent(dates);
+  }
   const element = matches.find(e => m.attribute ? e.getAttribute(m.attribute) : e.textContent.trim());
   // A torrent row may contain a nested title layout. Row selectors and stable
   // site IDs perform row de-duplication; the nested title must still be readable.
@@ -53,7 +60,8 @@ function readHtml (row, m) {
   return m.attribute ? element.getAttribute(m.attribute) : element.textContent.replace(/\s+/g, ' ').trim();
 }
 function signals (root, rules, json) {
-  return rules.filter(r => json ? valueAt(root, r.path) === r.equals : !!root.querySelector(r.selector));
+  const normalize = s => s.replace(/\s+/g, '').toLowerCase();
+  return rules.filter(r => json ? valueAt(root, r.path) === r.equals : [...root.querySelectorAll(r.selector)].some(e => r.text === undefined || normalize(e.textContent) === normalize(r.text)));
 }
 function consistent (values) { const s = [...new Set(values.filter(v => v !== null && v !== undefined))]; return s.length === 1 ? s[0] : null; }
 function parse (body, config, profile, now = Date.now() / 1000) {
@@ -67,7 +75,7 @@ function parse (body, config, profile, now = Date.now() / 1000) {
       if (!Array.isArray(rows)) fail('PROVIDER_RESPONSE_SHAPE');
     } else {
       if (typeof body !== 'string' || Buffer.byteLength(body) > 8 * 1024 ** 2) fail('PROVIDER_BODY_LIMIT');
-      dom = new JSDOM(body); // Deliberately no scripts, resources or browser execution.
+      dom = new JSDOM(body, { includeNodeLocations: !!config.hrAbsence }); // No scripts, resources or browser execution.
       const d = dom.window.document;
       if (d.querySelector('input[type="password"]') || /cf-chl-|checking your browser|verify you are human/i.test(body)) fail('PROVIDER_AUTH');
       if (!config.mapping.authenticated || !d.querySelector(config.mapping.authenticated)) fail('PROVIDER_AUTH');
@@ -77,7 +85,7 @@ function parse (body, config, profile, now = Date.now() / 1000) {
     const candidates = new Map(); let invalid = 0; let conflicts = 0;
     for (const root of rows.slice(0, 3000)) {
       const raw = {};
-      for (const [key, m] of Object.entries(config.mapping.fields)) raw[key] = json ? valueAt(root, m.path) : readHtml(root, m);
+      for (const [key, m] of Object.entries(config.mapping.fields)) raw[key] = json ? valueAt(root, m.path) : readHtml(root, m, config.mapping.timezoneOffset);
       let id = raw.id;
       const im = config.mapping.fields.id;
       if (im.query && id) { try { id = new URL(id, profile.origin).searchParams.get(im.query); } catch (_) { id = null; } }
@@ -107,6 +115,17 @@ function parse (body, config, profile, now = Date.now() / 1000) {
       };
       for (const k of ['seeders', 'leechers']) if (!Number.isSafeInteger(c[k])) c[k] = null;
       if (c.size !== null && (!Number.isSafeInteger(Math.ceil(c.size)) || c.size <= 0)) c.size = null;
+      if (!json && config.hrAbsence && !hrs.length) {
+        // A parser can repair truncated HTML. Absence is evidence only with
+        // original closing tags, the configured row structure and core fields.
+        const closed = e => !!e && !!dom.nodeLocation(e)?.endTag;
+        const d = dom.window.document;
+        if (closed(d.documentElement) && closed(d.body) && closed(root) && !root.querySelector(config.mapping.rows) &&
+          config.hrAbsence.rowSelectors.every(s => [...root.querySelectorAll(s)].some(closed)) &&
+          [c.size, c.seeders, c.leechers, c.pubTime].every(Number.isFinite) && c.link && c.url) {
+          c.hrState = 'exempt'; c.hrEvidence = 'site-rule-unmarked';
+        }
+      }
       const old = candidates.get(c.candidateKey);
       if (old) {
         // Duplicate pinned rows are common. Never choose the more favourable

@@ -663,6 +663,14 @@
   },
   "HHCLUB": {
     "label": "HHCLUB",
+    "hrAbsence": {
+      "rowSelectors": [".torrent-cat", ".torrent-title", ".torrent-info", ".torrent-manage"]
+    },
+    "hrRules": [
+      {"selector": ".hitandrun, .hit_and_run, .promotion-tag-hr, img[src*=\"hit_run\" i], img[src*=\"h&r\" i], img[src*=\"h%26r\" i]", "state": "required"},
+      {"selector": "img[alt*=\"H&R\" i], img[title*=\"H&R\" i], img[alt*=\"Hit&Run\" i], img[title*=\"Hit&Run\" i], img[alt*=\"Hit & Run\" i], img[title*=\"Hit & Run\" i]", "state": "required"},
+      {"selector": "span, b", "text": "H&R", "state": "required"}
+    ],
     "adapter": "html-rows",
     "origin": "https://hhanclub.net",
     "listPath": "/torrents.php",
@@ -678,10 +686,18 @@
       "spstate",
       "sort",
       "type",
-      "inclbookmarked"
+      "inclbookmarked",
+      "search-mode",
+      "search_area",
+      "search_all"
     ],
     "params": {
-      "incldead": 1
+      "incldead": 1,
+      "spstate": 2,
+      "inclbookmarked": 0,
+      "search-mode": 0,
+      "search_area": 0,
+      "search_all": 1
     },
     "budgetCaps": {
       "listPerHour": 36,
@@ -720,7 +736,18 @@
         },
         "publishedAt": {
           "selector": ".torrent-info-text-added [title]",
-          "attribute": "title"
+          "attribute": "title",
+          "format": "date"
+        },
+        "downloadUntil": {
+          "selector": "span[title]:not(.torrent-info-text-added span)",
+          "attribute": "title",
+          "format": "date"
+        },
+        "uploadUntil": {
+          "selector": "span[title]:not(.torrent-info-text-added span)",
+          "attribute": "title",
+          "format": "date"
         }
       }
     },

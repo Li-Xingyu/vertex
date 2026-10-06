@@ -50,11 +50,16 @@
                 <a-form-item v-if="!jsonMode" label="请求参数" :extra="'已有 ' + Object.keys(config.params).length + ' 项参数继续生效；折叠不会清空。'"><a-checkbox v-model:checked="showParams" :disabled="busy">显示站内分类、排序等高级参数</a-checkbox></a-form-item>
                 <template v-if="showParams || jsonMode"><a-form-item v-for="key in selectedProfile.queryKeys" :key="key" :label="parameterLabel(key)" :name="['params', key]" :extra="'请求参数：' + key + '；留空则不发送。'"><a-input size="small" :value="config.params[key]" :disabled="busy" @update:value="parameter(key, $event)" /></a-form-item></template>
                 <a-form-item v-for="(label, key) in budgetLabels" :key="key" :label="label" :name="['budgets', key]" :rules="numberRules(1, selectedProfile.budgetCaps[key], true)" :extra="budgetHelp(key)"><a-input-number size="small" v-model:value="config.budgets[key]" :min="1" :max="selectedProfile.budgetCaps[key]" :precision="0" :disabled="busy || (key === 'detailPerHour' && !jsonMode)" /></a-form-item>
+                <template v-if="!jsonMode">
+                  <a-form-item label="列表请求超时" extra="仅影响列表页请求，不增加请求预算、不自动重试，也不改变种子文件下载超时。"><a-checkbox :checked="!!config.listTimeouts" :disabled="busy" @update:checked="setTimeouts">分别配置连接、读取和总时长</a-checkbox></a-form-item>
+                  <template v-if="config.listTimeouts"><a-form-item v-for="(item, key) in timeoutFields" :key="key" :label="item.label" :name="['listTimeouts', key]" :rules="timeoutRules(key)" :extra="item.help"><a-input-number :id="'provider-' + key" size="small" v-model:value="config.listTimeouts[key]" :min="1" :max="item.max" :precision="0" :disabled="busy" /></a-form-item></template>
+                  <a-form-item v-else :wrapper-col="actionCol"><span class="provider-secondary">未单独配置：单页最多 20 秒、读取空闲 15 秒、整轮最多 25 秒。载入旧配置不会自动改写。</span></a-form-item>
+                </template>
               </a-tab-pane>
               <a-tab-pane key="selection" tab="筛选条件" :force-render="true">
                 <a-alert class="provider-message" type="info" show-icon message="这里只做来源预筛选，不能放宽原有空间、保种及去重保护。" />
                 <a-form-item label="免费下载" :name="['selection', 'freeOnly']"><a-checkbox v-model:checked="config.selection.freeOnly" :disabled="busy">仅选择已确认免费</a-checkbox></a-form-item>
-                <a-form-item label="H&R 入场" :name="['selection', 'hrPolicy']" extra="无标记不等于免 H&R；此处不会修改现有保种或删种规则。"><a-select size="small" v-model:value="config.selection.hrPolicy" :disabled="busy" :options="[{value:'protect', label:'允许入场，保留现有保种保护'}, {value:'exclude', label:'仅选择明确免 H&R'}]" /></a-form-item>
+                <a-form-item label="H&R 入场" :name="['selection', 'hrPolicy']" extra="无标记默认未知；仅在站规已确认且配置了完整性检查时，才能判为无 H&R。此处不修改保种或删种规则。"><a-select size="small" v-model:value="config.selection.hrPolicy" :disabled="busy" :options="[{value:'protect', label:'允许入场，保留现有保种保护'}, {value:'exclude', label:'仅选择已确认无 H&R'}]" /></a-form-item>
                 <a-form-item v-for="(label, key) in selectionLabels" :key="key" :label="label" :name="['selection', key]" :rules="selectionRules(key)"><a-input-number size="small" v-model:value="config.selection[key]" :min="0" :max="100000" :disabled="busy" /></a-form-item>
                 <a-form-item label="多倍上传" :name="['selection', 'preferUploadFactor']" extra="上传倍率与免费分别识别。私有迁移策略仍可能执行更严格的排序。"><a-checkbox v-model:checked="config.selection.preferUploadFactor" :disabled="busy">优先已确认且未过期的上传倍率</a-checkbox></a-form-item>
                 <a-form-item label="基础排序" :name="['selection', 'sort']"><a-select size="small" v-model:value="config.selection.sort" :disabled="busy" :options="[{value:'publishedAt', label:'新发布优先'}, {value:'demand', label:'需求优先（下载人数 / √做种人数 × 有效倍率）'}]" /></a-form-item>
@@ -85,17 +90,22 @@
                   </div>
                 </div>
                 <a-button size="small" :disabled="busy || config.promotionRules.length >= 40" @click="addPromotion">新增促销标记</a-button>
-                <h3 class="provider-subtitle">H&R 明确信号</h3><p class="provider-secondary">仅识别入场标记，不作为已完成保种的证明。没有匹配标记时保留“未知”。</p>
+                <h3 class="provider-subtitle">H&R 明确信号</h3><p class="provider-secondary">仅识别入场要求，不作为已完成保种的证明。默认没有匹配标记时保留“未知”。</p>
                 <p v-if="!config.hrRules.length" class="provider-secondary">尚未配置明确信号。</p>
                 <div v-for="(r, i) in config.hrRules" :key="i" class="provider-marker">
                   <div class="provider-marker-heading"><span>H&R {{ i + 1 }}</span><a-button type="link" danger size="small" :aria-label="'移除 H&R ' + (i + 1)" :disabled="busy" @click="config.hrRules.splice(i, 1)">移除</a-button></div>
                   <div class="provider-marker-fields">
                     <div class="provider-marker-selector"><label :for="'hr-selector-' + i">{{ jsonMode ? 'JSON 路径' : 'CSS 选择器' }}</label><a-input :id="'hr-selector-' + i" size="small" v-model:value="r[jsonMode ? 'path' : 'selector']" :disabled="busy" /></div>
                     <div v-if="jsonMode"><label :for="'hr-value-' + i">匹配值</label><a-input :id="'hr-value-' + i" size="small" :value="enumText(r.equals)" :disabled="busy" @update:value="setEnum(r, $event)" /></div>
+                    <div v-else><label :for="'hr-text-' + i">标记文字（可选）</label><a-input :id="'hr-text-' + i" size="small" :value="r.text || ''" :disabled="busy" @update:value="setHrText(r, $event)" placeholder="留空只检查选择器" /></div>
                     <div><label :for="'hr-state-' + i">识别结果</label><a-select :id="'hr-state-' + i" size="small" v-model:value="r.state" :disabled="busy" :options="[{value:'required', label:'明确有 H&R'}, {value:'exempt', label:'明确免 H&R'}]" /></div>
                   </div>
                 </div>
                 <a-button size="small" :disabled="busy || config.hrRules.length >= 12" @click="addHr">新增 H&R 标记</a-button>
+                <template v-if="!jsonMode">
+                  <a-form-item label="按站规识别无标签种子" extra="仅适用于已确认“有 H&R 必显示标签”的站点。有 H&R 标记或证据冲突时不放行；页面/种子行未闭合、结构或关键字段缺失时仍为未知。不代表站内 H&R 已达标。"><a-switch size="small" :checked="!!config.hrAbsence" :disabled="busy" @change="setHrAbsence" /></a-form-item>
+                  <a-form-item v-if="config.hrAbsence" label="种子行完整性选择器" extra="每行一个，全部必须在当前种子行内匹配；最多 8 个。"><a-textarea size="small" :value="config.hrAbsence.rowSelectors.join('\n')" :disabled="busy" :auto-size="{minRows:2,maxRows:8}" @update:value="config.hrAbsence.rowSelectors = $event.split('\n')" /></a-form-item>
+                </template>
               </a-tab-pane>
               <a-tab-pane key="preview" tab="预览结果">
                 <p>请求一页预览会消耗共享列表预算；不下载 .torrent、不调用下载器。HTML 暂不自动请求详情补齐。</p>
@@ -108,7 +118,7 @@
                       <template v-else-if="column.key === 'seeders'">{{ record.seeders ?? '未知' }}</template>
                       <template v-else-if="column.key === 'leechers'">{{ record.leechers ?? '未知' }}</template>
                       <template v-else-if="column.key === 'promotion'">下载 {{ factor(record.downloadFactor) }}<br>上传 {{ factor(record.uploadFactor) }}</template>
-                      <template v-else-if="column.key === 'hr'">{{ {required:'有 H&R', exempt:'明确免 H&R', unknown:'未知'}[record.hrState] || '未知' }}</template>
+                      <template v-else-if="column.key === 'hr'">{{ {required:'有 H&R', exempt:'无 H&R 要求', unknown:'未知'}[record.hrState] || '未知' }}</template>
                       <template v-else-if="column.key === 'reason'"><a-tag v-if="!record.reasons.length" color="success">通过来源筛选</a-tag><span v-else>{{ record.reasons.map(reason).join('；') }}</span></template>
                     </template>
                   </a-table>
@@ -155,6 +165,13 @@ const errors = {
   PROVIDER_LEGACY_REFRESH_BUSY: '旧采集仍在运行，请等待本轮结束后重试。',
   PROVIDER_SELECTOR_INVALID: 'CSS 选择器语法不正确，请检查“解析规则”。',
   PROVIDER_HTTP: '站点请求失败，已保留当前配置，请稍后重试。',
+  PROVIDER_TIMEOUT_DNS: '解析站点域名超时；尚未获取页面。',
+  PROVIDER_TIMEOUT_TCP: '连接站点超时；尚未获取页面。',
+  PROVIDER_TIMEOUT_TLS: '站点 TLS 握手超时；尚未获取页面。',
+  PROVIDER_TIMEOUT_HEADERS: '等待站点响应超时；尚未收到完整响应头。',
+  PROVIDER_TIMEOUT_BODY: '页面传输超时；已拒绝使用不完整页面。',
+  PROVIDER_CYCLE_DEADLINE: '本轮列表采集已达到总时长上限，未使用部分结果。',
+  PROVIDER_TIMEOUT_CONFIG: '超时配置无效：单页总时长须覆盖连接和读取，整轮须覆盖单页。',
   PROVIDER_POLL_LIMIT: '轮询间隔或页数超出允许范围，请检查“基础设置”。',
   PROVIDER_THRESHOLD: '筛选阈值无效，请检查体积范围、人数与种龄。',
   PROVIDER_BUDGET: '请求预算超出站点模板允许范围。',
@@ -168,6 +185,12 @@ export default {
       sourceColumns: [{ title: '任务 / 站点', key: 'source', width: 230 }, { title: '运行状态', key: 'state', width: 190 }, { title: '最近列表成功', key: 'time', width: 260 }, { title: '操作', key: 'actions', width: 80 }],
       candidateColumns: [{ title: '候选', dataIndex: 'name', ellipsis: true, width: 270 }, { title: '体积（展示值）', key: 'size', width: 145 }, { title: '做种', key: 'seeders', width: 70 }, { title: '下载', key: 'leechers', width: 70 }, { title: '促销识别', key: 'promotion', width: 140 }, { title: 'H&R', key: 'hr', width: 110 }, { title: '来源筛选原因', key: 'reason', width: 260 }],
       budgetLabels: { listPerHour: '列表请求预算', detailPerHour: '详情请求预算', metadataPerHour: '元数据预算' },
+      timeoutFields: {
+        connectSeconds: { label: '连接上限（秒）', max: 30, help: '包含域名解析、TCP 连接及 TLS 握手。' },
+        readSeconds: { label: '读取空闲（秒）', max: 60, help: '连接建立后等待响应及相邻数据之间的最长等待，不是整页耗时。' },
+        requestSeconds: { label: '单页总时长（秒）', max: 120, help: '从域名解析到完整页面的总时长上限，持续慢速传输也不能无限等待。' },
+        cycleSeconds: { label: '整轮总时长（秒）', max: 180, help: '所有页面共用；后续页面只使用剩余时长。超时不回退 RSS。' }
+      },
       selectionLabels: { minGiB: '最小体积（GiB）', maxGiB: '最大体积（GiB）', minSeeders: '最少做种人数', minLeechers: '最少下载人数', maxAgeHours: '最大种龄（小时）', minFreeSeconds: '免费剩余时间（秒）' },
       fieldLabels: { id: '种子 ID', title: '标题', size: '体积', seeders: '做种人数', leechers: '下载人数', publishedAt: '发布时间', detail: '详情链接', download: '下载链接', downloadUntil: '下载优惠截止', uploadUntil: '上传优惠截止', downloadUnlimited: '长期下载优惠', uploadUnlimited: '长期上传优惠' },
       attributeOptions: ['', 'href', 'title', 'datetime', 'data-timestamp', 'value'].map(value => ({ value, label: value || '文本' }))
@@ -216,6 +239,13 @@ export default {
     parameterLabel (key) { return ({ mode: '分类分区', categories: '分类 ID', cat: '分类 ID', sort: '站内排序', type: '列表类型', incldead: '存活状态', inclbookmarked: '收藏范围', spstate: '促销状态' })[key] || '参数 ' + key; },
     budgetHelp (key) { return key === 'detailPerHour' && !this.jsonMode ? 'HTML 自动详情补齐尚未实现，此项仅保留配置，不参与请求。' : '单位：次/小时。模板上限 ' + this.selectedProfile.budgetCaps[key] + '，仍受原驱动更严格的预算约束。'; },
     numberRules (min, max, integer = false) { return [{ required: true, type: integer ? 'integer' : 'number', min, max, message: '请输入 ' + min + '–' + max + (integer ? ' 之间的整数' : ' 之间的数值') }]; },
+    setTimeouts (enabled) { if (enabled) this.config.listTimeouts = { connectSeconds: 15, readSeconds: 30, requestSeconds: 60, cycleSeconds: 120 }; else delete this.config.listTimeouts; },
+    timeoutRules (key) {
+      return [...this.numberRules(1, this.timeoutFields[key].max, true), { validator: () => {
+        const t = this.config.listTimeouts;
+        return t && t.requestSeconds >= Math.max(t.connectSeconds, t.readSeconds) && t.cycleSeconds >= t.requestSeconds ? Promise.resolve() : Promise.reject(new Error('单页须覆盖连接和读取，整轮须覆盖单页'));
+      } }];
+    },
     selectionRules (key) {
       const rules = this.numberRules(0, 100000, ['minSeeders', 'minLeechers'].includes(key));
       if (key === 'maxGiB') rules.push({ validator: (_, v) => v > this.config.selection.minGiB ? Promise.resolve() : Promise.reject(new Error('最大体积必须大于最小体积')) });
@@ -231,7 +261,7 @@ export default {
       try { await fn(); } catch (e) {
         if (e.errorFields?.length) {
           const field = e.errorFields[0].name;
-          this.tab = ['mapping', 'promotionRules', 'hrRules'].includes(field[0]) ? 'mapping' : field[0] === 'selection' ? 'selection' : 'source';
+          this.tab = ['mapping', 'promotionRules', 'hrRules', 'hrAbsence'].includes(field[0]) ? 'mapping' : field[0] === 'selection' ? 'selection' : 'source';
           await this.$nextTick(); this.$refs.configForm?.scrollToField(field, { block: 'center' }); this.error = '请先修正表单中标出的字段。';
         } else if (action === 'refresh') this.listError = this.explain(e.message);
         else this.error = this.explain(e.message);
@@ -266,6 +296,8 @@ export default {
     async create () { await this.run('create', async () => { this.config = await api.call('defaults?profile=' + encodeURIComponent(this.createForm.profile) + '&rssId=' + encodeURIComponent(this.createForm.rssId)); this.savedJson = ''; this.expectedRevision = 0; this.applyUncertain = false; this.tab = 'source'; this.previewResult = null; this.previewJson = ''; this.notice = '模板已载入，请核对实际阈值与解析结果。'; await this.focusEditor(); }); },
     addPromotion () { this.config.promotionRules.push({ ...(this.jsonMode ? { path: '', equals: '' } : { selector: '' }), downloadFactor: null, uploadFactor: null }); },
     addHr () { this.config.hrRules.push({ ...(this.jsonMode ? { path: '', equals: '' } : { selector: '' }), state: 'required' }); },
+    setHrText (rule, text) { if (text.trim()) rule.text = text; else delete rule.text; },
+    setHrAbsence (enabled) { if (enabled) this.config.hrAbsence = { rowSelectors: [''] }; else delete this.config.hrAbsence; },
     async validateForm () { await this.$refs.configForm.validateFields(); },
     updateRecord (record) { const index = this.data.records.findIndex(r => r.id === record.id); if (index < 0) this.data.records.push(record); else this.data.records.splice(index, 1, { ...this.data.records[index], ...record }); },
     async validate () { await this.run('validate', async () => { await this.validateForm(); await api.call('validate', { config: this.config }); this.notice = '结构与选择器校验通过，尚未验证站点响应。'; this.$message().success('配置校验通过'); }); },

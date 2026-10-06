@@ -59,6 +59,10 @@ async function main () {
       await clickText('载入模板'); await page.waitForFunction(() => document.body.textContent.includes('模板已载入'));
     };
     await loadTemplate();
+    assert.equal(await page.$eval('#provider-connectSeconds', e => e.value), '15');
+    assert.equal(await page.$eval('#provider-readSeconds', e => e.value), '30');
+    assert.equal(await page.$eval('#provider-requestSeconds', e => e.value), '60');
+    assert.equal(await page.$eval('#provider-cycleSeconds', e => e.value), '120');
     assert.equal(JSON.parse((await request('GET', '/api/provider/list', null, cookie)).text).data.records.length, 0);
     assert(await applyDisabled());
     assert(!await page.$eval('.provider-page', e => /版本记录|保存草稿|编辑 v\d/.test(e.textContent)));
@@ -85,6 +89,12 @@ async function main () {
     await page.waitForSelector('.ant-form-item-has-error');
     assert.equal(JSON.parse((await request('GET', '/api/provider/list', null, cookie)).text).data.records.length, 0);
     await setIntervalField(String(cfg.intervalSeconds)); await clickText('校验配置');
+    await page.waitForFunction(() => document.body.textContent.includes('结构与选择器校验通过'));
+    phase = 'timeout-validation';
+    const setTimeoutField = async (key, value) => { await page.click('#provider-' + key, { clickCount: 3 }); await page.keyboard.press('Backspace'); await page.keyboard.type(value); await page.keyboard.press('Tab'); };
+    await setTimeoutField('requestSeconds', '10'); await clickText('校验配置');
+    await page.waitForFunction(() => document.body.textContent.includes('单页须覆盖连接和读取'));
+    await setTimeoutField('requestSeconds', '60'); await clickText('校验配置');
     await page.waitForFunction(() => document.body.textContent.includes('结构与选择器校验通过'));
     phase = 'preview-presentation-fixtures';
     // Presentation fixtures only. Apply writes synthetic tmpfs via the real
@@ -137,7 +147,9 @@ async function main () {
     await page.waitForFunction(() => document.querySelector('#provider-apply-help').textContent.includes('已过期'));
     assert(await applyDisabled());
     previewMode = 'ok'; await clickText('重新预览'); await page.waitForFunction(() => !document.querySelector('.provider-actions [aria-describedby]').disabled);
-    await tab('基础设置'); await setIntervalField('700'); assert(await applyDisabled());
+    await tab('基础设置'); await setTimeoutField('readSeconds', '40'); assert(await applyDisabled());
+    assert.equal(await page.$('.provider-preview-summary'), null);
+    await setTimeoutField('readSeconds', '30'); await setIntervalField('700'); assert(await applyDisabled());
     assert.equal(await page.$('.provider-preview-summary'), null);
     listFailure = true; await clickText('刷新'); await page.waitForFunction(() => document.body.textContent.includes('操作失败，请检查服务连接'));
     assert.equal(await page.$eval('#provider-interval', e => e.value), '700');
@@ -199,6 +211,10 @@ async function main () {
         await tab(text);
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 2);
         assert.equal(overflow, false, 'page viewport overflow ' + width + ' ' + text);
+        if (text === '基础设置' && (width === 1440 || width === 375)) {
+          await page.$eval('#provider-readSeconds', e => e.scrollIntoView({ block: 'center' }));
+          await page.screenshot({ path: '/tmp/provider-timeouts-' + width + '.png', fullPage: true });
+        }
       }
       widths.push(width);
       await tab('筛选条件');
@@ -248,6 +264,18 @@ async function main () {
     const activation = await request('POST', '/api/provider/apply', { config: cfg, expectedRevision: saved.revision, token: 'not-real' }, cookie);
     assert.equal(activation.status, 400); assert.equal(JSON.parse(activation.text).message, 'PROVIDER_PREVIEW_REQUIRED');
     assert(!await page.$eval('.provider-page', e => /版本记录|保存草稿|编辑 v\d/.test(e.textContent)));
+    phase = 'legacy-timeouts-not-injected';
+    const oldConfig = JSON.parse(JSON.stringify(cfg)); delete oldConfig.listTimeouts;
+    await fixtureStore.apply(oldConfig, (await fixtureStore.read(cfg.rssId)).revision, async () => {});
+    const oldBytes = fs.readFileSync('/vertex/data/providers/' + cfg.rssId + '.json', 'utf8');
+    await clickText('刷新'); await page.waitForFunction(() => document.body.textContent.includes('配置已被其他操作修改'));
+    await clickText('结束编辑'); await page.waitForSelector('#provider-rss');
+    await page.click('button[aria-label="编辑 隔离采集示例"]'); await page.waitForSelector('#provider-interval');
+    assert.equal(await page.$('#provider-readSeconds'), null);
+    assert(!await page.$eval('.provider-summary', e => e.textContent.includes('有未保存修改')));
+    assert.equal(fs.readFileSync('/vertex/data/providers/' + cfg.rssId + '.json', 'utf8'), oldBytes);
+    assert(await applyDisabled());
+    process.stdout.write(JSON.stringify({ timeoutDefaults: true, timeoutRelationsValidated: true, timeoutEditInvalidatesPreview: true, legacyTimeoutConfigUnchanged: true }) + '\n');
     assert.equal(fs.readdirSync('/vertex/torrents').length, 0);
     process.stdout.write(JSON.stringify({ ok: true, auth: true, csrfHeader: true, serverBlocksFakeProof: true, noVersionUi: true, noDraftWrite: true, singleConfigApplyFixtures: true, conflictPreservesInput: true, lostReplyReconciledWithoutRetry: true, unknownOutcomeBlocksRetry: true, suspendAndResume: true, unsavedGuards: true, inlineValidation: true, previewFailureExpiryAndInvalidation: true, previewFixtureCalls: previewCalls, applyFixtureCalls: applyCalls, refreshFailurePreservesInput: true, existingPageTypographyAndControls: true, darkMode: true, reducedMotion: true, responsiveWidths: widths, javascriptErrors: 0, torrentFiles: 0, production: false }) + '\n');
   } catch (e) { if (page) await page.screenshot({ path: '/tmp/provider-ui-failure.png', fullPage: true }).catch(() => {}); throw e; } finally { await browser.close(); }

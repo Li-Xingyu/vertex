@@ -1,7 +1,8 @@
 'use strict';
 
 // Declarative defaults, NOT evidence of a live site's current semantics. UI
-// edits are revisioned separately. In particular, absence of HR is never proof.
+// edits are revisioned separately. HR absence requires explicit site semantics
+// and a complete authenticated row; it is never a global fallback.
 const profiles = require('./provider-profiles.json');
 const clone = x => JSON.parse(JSON.stringify(x));
 function defaults (profile, rssId) {
@@ -18,10 +19,12 @@ function defaults (profile, rssId) {
     intervalSeconds: 300,
     pages: 1,
     pageSize: 100,
+    ...(p.adapter === 'mteam-api' ? {} : { listTimeouts: { connectSeconds: 15, readSeconds: 30, requestSeconds: 60, cycleSeconds: 120 } }),
     params: clone(p.params),
     mapping,
     promotionRules: clone(p.promotionRules || profiles.NEXUS_TEMPLATE.promotionRules),
     hrRules: clone(p.hrRules || profiles.NEXUS_TEMPLATE.hrRules),
+    ...(p.hrAbsence ? { hrAbsence: clone(p.hrAbsence) } : {}),
     selection: { freeOnly: ['MTEAM', 'HHCLUB'].includes(profile), hrPolicy: profile === 'HHCLUB' ? 'exclude' : 'protect', minGiB: 0, maxGiB: 600, minSeeders: 1, minLeechers: 1, maxAgeHours: 168, minFreeSeconds: 7200, sort: 'publishedAt', preferUploadFactor: true },
     budgets: { listPerHour: 12, detailPerHour: 12, metadataPerHour: 12 }
   };

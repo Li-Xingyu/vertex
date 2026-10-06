@@ -22,13 +22,22 @@ function mapping (m) {
 }
 function validate (c, profiles) {
   if (JSON.stringify(c).length > 32768) fail('PROVIDER_CONFIG_TOO_LARGE');
-  keys(c, ['version', 'profile', 'rssId', 'credentialRef', 'intervalSeconds', 'pages', 'pageSize', 'params', 'mapping', 'promotionRules', 'hrRules', 'selection', 'budgets'], 'CONFIG');
+  keys(c, ['version', 'profile', 'rssId', 'credentialRef', 'intervalSeconds', 'pages', 'pageSize', 'params', 'mapping', 'promotionRules', 'hrRules', 'hrAbsence', 'selection', 'budgets', 'listTimeouts'], 'CONFIG');
   const p = profiles[c.profile];
   if (c.version !== 1 || !p || !/^[a-f0-9]{8}$/.test(c.rssId || '')) fail('PROVIDER_ID');
   if (!/^(site:[A-Za-z0-9_-]{1,48}|rss:[a-f0-9]{8}|driver)$/.test(c.credentialRef || '')) fail('PROVIDER_CREDENTIAL_REF');
   if (c.credentialRef.startsWith('rss:') && c.credentialRef !== 'rss:' + c.rssId) fail('PROVIDER_CREDENTIAL_SCOPE');
   if (!integer(c.intervalSeconds, 300, 86400) || !integer(c.pages, 1, 3) || !integer(c.pageSize, 1, 100)) fail('PROVIDER_POLL_LIMIT');
   if (p.adapter === 'mteam-api' && c.pages !== 1) fail('PROVIDER_POLL_LIMIT');
+  // Optional for byte-compatible existing configurations. MT owns its API
+  // transport/ledger; these controls apply only to authenticated HTML lists.
+  if (c.listTimeouts !== undefined) {
+    const t = c.listTimeouts;
+    keys(t, ['connectSeconds', 'readSeconds', 'requestSeconds', 'cycleSeconds'], 'TIMEOUTS');
+    if (p.adapter === 'mteam-api' || !integer(t.connectSeconds, 1, 30) || !integer(t.readSeconds, 1, 60) ||
+      !integer(t.requestSeconds, 1, 120) || !integer(t.cycleSeconds, 1, 180) ||
+      t.requestSeconds < Math.max(t.connectSeconds, t.readSeconds) || t.cycleSeconds < t.requestSeconds) fail('PROVIDER_TIMEOUT_CONFIG');
+  }
   keys(c.params, p.queryKeys, 'PARAMS');
   for (const v of Object.values(c.params)) if (!(str(v, 512, true) || (typeof v === 'number' && Number.isFinite(v))) || /[\r\n]/.test(String(v))) fail('PROVIDER_PARAM');
   keys(c.mapping, ['rows', 'authenticated', 'fields', 'timezoneOffset'], 'MAPPING');
@@ -43,8 +52,16 @@ function validate (c, profiles) {
     for (const k of ['downloadFactor', 'uploadFactor']) if (r[k] !== null && (typeof r[k] !== 'number' || !Number.isFinite(r[k]) || r[k] < 0 || r[k] > 100)) fail('PROVIDER_FACTOR');
   }
   for (const r of c.hrRules) {
-    keys(r, ['selector', 'path', 'equals', 'state'], 'HR'); marker(r);
+    keys(r, ['selector', 'path', 'equals', 'state', 'text'], 'HR'); marker(r);
+    if (r.text !== undefined && (!r.selector || !str(r.text, 80) || !r.text.trim())) fail('PROVIDER_HR_TEXT');
     if (!['required', 'exempt'].includes(r.state)) fail('PROVIDER_HR_STATE');
+  }
+  // Opt-in site semantics, not a global fallback. Old saved configs stay unknown.
+  if (c.hrAbsence !== undefined) {
+    keys(c.hrAbsence, ['rowSelectors'], 'HR_ABSENCE');
+    const selectors = c.hrAbsence.rowSelectors;
+    if (p.adapter === 'mteam-api' || !Array.isArray(selectors) || selectors.length < 1 || selectors.length > 8 ||
+      selectors.some(s => !str(s, 256) || !s.trim()) || !c.hrRules.some(r => r.state === 'required' && r.selector)) fail('PROVIDER_HR_ABSENCE');
   }
   keys(c.selection, ['freeOnly', 'hrPolicy', 'minGiB', 'maxGiB', 'minSeeders', 'minLeechers', 'maxAgeHours', 'minFreeSeconds', 'sort', 'preferUploadFactor'], 'SELECTION');
   const s = c.selection;

@@ -26,7 +26,9 @@ const config = () => {
 };
 const row = (id = 12, marker = '', extra = '') => `<tr><td><a href="details.php?id=${id}"><img src="ignored"></a><a href="details.php?id=${id}">Fixture ${id}</a><a href="download.php?id=${id}">download</a>${marker}</td><td class="size">1.00 GiB</td><td>5</td><td>9</td><td><time datetime="${new Date(now * 1000).toISOString()}"></time><span class="expiry" title="${new Date((now + 14400) * 1000).toISOString()}"></span>${extra}</td></tr>`;
 const html = rows => `<a href="logout.php">Logout</a><div class="pro_free2up"></div><table class="torrents"><tr><th>Title</th><th>Size</th><th><img alt="seeders"></th><th><img alt="leechers"></th><th>Time</th></tr>${rows}</table>`;
+const hhHtml = (marker = 'promotion-tag-twoupfree', extra = '') => '<a href="logout.php">x</a><div class="torrent-table-sub-info"><a class="torrent-info-text-name" href="details.php?id=12">Fixture HH</a><a href="download.php?id=12">download</a><span class="torrent-info-text-size">1 GiB</span><span class="torrent-info-text-seeders">2</span><span class="torrent-info-text-leechers">10</span><div class="torrent-info-text-added"><span title="' + new Date((now - 60) * 1000).toISOString() + '">published</span></div><span class="promotion-tag ' + marker + '"></span><span title="' + new Date((now + 14400) * 1000).toISOString() + '">expiry</span>' + extra + '</div>';
 async function test (name, fn) { await fn(); results.push(name); process.stdout.write('PASS ' + name + '\n'); }
+const hhComplete = (extra = '') => '<!doctype html><html><body>' + hhHtml('promotion-tag-free', '<div class="torrent-cat"></div><div class="torrent-title"></div><div class="torrent-info"></div><div class="torrent-manage"></div>' + extra) + '</body></html><script>/* site appends scripts after html */</script>';
 async function main () {
   await test('all ten defaults pass schema; invalid identifier rejected', () => {
     for (const id of Object.keys(profiles)) validate(defaults(id, '1234abcd'), profiles);
@@ -39,6 +41,71 @@ async function main () {
   });
   await test('bounded intervals pages budgets and JSON paths', () => {
     for (const edit of [c => { c.pages = 4; }, c => { c.intervalSeconds = 0; }, c => { c.budgets.metadataPerHour = 999; }, c => { c.params.passkey = 'forbidden'; }]) { const c = config(); edit(c); assert.throws(() => validate(c, profiles)); }
+  });
+  await test('HTML timeout configuration is optional bounded and never applies to MT', () => {
+    const c = config(); const old = { ...c }; delete old.listTimeouts;
+    assert.equal(JSON.stringify(validate(old, profiles)), JSON.stringify(old));
+    for (const t of [null, {}, { ...c.listTimeouts, connectSeconds: 31 }, { ...c.listTimeouts, readSeconds: 61 }, { ...c.listTimeouts, requestSeconds: 121 }, { ...c.listTimeouts, cycleSeconds: 181 }, { ...c.listTimeouts, requestSeconds: 14 }, { ...c.listTimeouts, cycleSeconds: 59 }, { ...c.listTimeouts, readSeconds: 1.5 }, { ...c.listTimeouts, retries: 1 }]) assert.throws(() => validate({ ...c, listTimeouts: t }, profiles));
+    const mt = defaults('MTEAM', '1234abcd'); assert.equal(mt.listTimeouts, undefined);
+    assert.throws(() => validate({ ...mt, listTimeouts: c.listTimeouts }, profiles));
+  });
+  await test('HH browser form parameters are configurable and remain site scoped', () => {
+    const c = defaults('HHCLUB', '57d6ce6e'); validate(c, profiles);
+    assert.deepEqual(c.params, { incldead: 1, spstate: 2, inclbookmarked: 0, 'search-mode': 0, search_area: 0, search_all: 1 });
+    assert.throws(() => validate({ ...config(), params: { 'search-mode': 0 } }, profiles));
+    assert.throws(() => validate({ ...c, params: { ...c.params, passkey: 'forbidden' } }, profiles));
+  });
+  await test('HH list alone exposes candidate fields and 2x free without invented HR exemption', () => {
+    const c = defaults('HHCLUB', '57d6ce6e'); const x = parse(hhHtml(), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(x.torrentId, '12'); assert.equal(x.size, 1024 ** 3); assert.equal(x.seeders, 2); assert.equal(x.leechers, 10); assert.equal(x.pubTime, now - 60);
+    assert.equal(x.downloadFactor, 0); assert.equal(x.uploadFactor, 2); assert.equal(x.downloadUntil, now + 14400); assert.equal(x.uploadUntil, now + 14400);
+    assert.equal(x.hrState, 'unknown'); assert.deepEqual(eligibility(x, c, now), ['hr-not-exempt']);
+    assert.equal(parse(hhHtml('promotion-tag-free'), c, profiles.HHCLUB, now).candidates[0].uploadFactor, null);
+  });
+  await test('HH date selection ignores publication and rejects conflicting expiry evidence', () => {
+    const c = defaults('HHCLUB', '57d6ce6e');
+    const duplicate = parse(hhHtml('promotion-tag-free', '<span title="' + new Date((now + 14400) * 1000).toISOString() + '">same</span><span title="tooltip">tip</span>'), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(duplicate.downloadUntil, now + 14400);
+    const conflict = parse(hhHtml('promotion-tag-free', '<span title="' + new Date((now + 28800) * 1000).toISOString() + '">other</span>'), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(conflict.downloadUntil, null); assert.equal(conflict.uploadUntil, null); assert(eligibility(conflict, c, now).includes('free-expiry-unverified'));
+    const missing = parse(hhHtml().replace(/<span title="[^"]+">expiry<\/span>/, ''), c, profiles.HHCLUB, now).candidates[0]; assert.equal(missing.downloadUntil, null);
+  });
+  await test('HH explicit HR and conflicting promotions remain blocked', () => {
+    const c = defaults('HHCLUB', '57d6ce6e');
+    const marked = parse(hhHtml('promotion-tag-twoupfree', '<img alt="H&amp;R">'), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(marked.hrState, 'required'); assert(eligibility(marked, c, now).includes('hr-not-exempt'));
+    const conflict = parse(hhHtml('promotion-tag-free pro_50pct'), c, profiles.HHCLUB, now).candidates[0]; assert.equal(conflict.downloadFactor, null); assert(eligibility(conflict, c, now).includes('not-confirmed-free'));
+  });
+  await test('HH opt-in site rule accepts complete unmarked rows, not fragments or a horizontal rule as HR', () => {
+    const c = defaults('HHCLUB', '57d6ce6e');
+    const x = parse(hhComplete('<hr>'), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(x.hrState, 'exempt'); assert.equal(x.hrEvidence, 'site-rule-unmarked'); assert.deepEqual(eligibility(x, c, now), []);
+    delete c.hrAbsence; const old = parse(hhComplete(), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(old.hrState, 'unknown'); assert(eligibility(old, c, now).includes('hr-not-exempt'));
+  });
+  await test('HR image URL, encoded URL, alt, title and text all defeat unmarked fallback', () => {
+    const c = defaults('HHCLUB', '57d6ce6e');
+    for (const marker of ['<img src="/seedbox_icon/h&amp;r.png">', '<img src="/seedbox_icon/h%26r.png">', '<img alt="Hit &amp; Run">', '<img title="H&amp;R">', '<span>H &amp; R</span>', '<b>h&amp;r</b>', '<span class="promotion-tag-hr"></span>']) {
+      const x = parse(hhComplete(marker), c, profiles.HHCLUB, now).candidates[0]; assert.equal(x.hrState, 'required', marker); assert(eligibility(x, c, now).includes('hr-not-exempt'));
+    }
+    c.hrRules.push({ selector: '.exempt', state: 'exempt' });
+    const conflict = parse(hhComplete('<img title="H&amp;R"><span class="exempt"></span>'), c, profiles.HHCLUB, now).candidates[0];
+    assert.equal(conflict.hrState, 'unknown'); assert(eligibility(conflict, c, now).includes('hr-not-exempt'));
+  });
+  await test('unmarked inference fails closed for incomplete document row structure fields and foreign URLs', () => {
+    const c = defaults('HHCLUB', '57d6ce6e'); const full = hhComplete();
+    for (const body of [full.replace('</html>', ''), full.replace('</body>', ''), full.replace('</div></body>', '</body>'), full.replace('class="torrent-title"', 'class="changed"'), full.replace('class="torrent-info-text-size"', 'class="changed"'), full.replace('href="download.php?id=12"', 'href="https://example.invalid/download.php?id=12"'), full.replace('class="torrent-info-text-seeders">2', 'class="torrent-info-text-seeders">unknown')]) {
+      const x = parse(body, c, profiles.HHCLUB, now).candidates[0]; assert.equal(x.hrState, 'unknown'); assert(eligibility(x, c, now).includes('hr-not-exempt'));
+    }
+    assert.throws(() => parse(full + '<input type="password">', c, profiles.HHCLUB, now));
+  });
+  await test('HR absence configuration is bounded HTML-only and requires a positive detector', () => {
+    const c = defaults('HHCLUB', '57d6ce6e');
+    for (const absence of [null, {}, { rowSelectors: [] }, { rowSelectors: [''] }, { rowSelectors: [' '] }, { rowSelectors: Array(9).fill('.row') }, { rowSelectors: ['.row'], anything: true }]) assert.throws(() => validate({ ...c, hrAbsence: absence }, profiles));
+    assert.throws(() => validate({ ...c, hrRules: [] }, profiles));
+    assert.throws(() => validate({ ...defaults('MTEAM', '1234abcd'), hrAbsence: c.hrAbsence }, profiles));
+    assert.throws(() => validate({ ...c, hrRules: [{ selector: 'span', text: ' ', state: 'required' }] }, profiles));
+    assert.throws(() => validate({ ...c, hrRules: [{ path: 'hr', equals: true, text: 'H&R', state: 'required' }] }, profiles));
   });
   await test('real fields and separate free versus upload multiplier', () => {
     const c = config(); const x = parse(html(row(12, '<span class="pro_free2up"></span>')), c, profiles.CARPT).candidates[0];
@@ -194,9 +261,14 @@ async function runtimeTests () {
   const globals = { runningRss: { [rss.id]: rss }, runningClient: { [client.id]: client } };
   let clockOffset = 0;
   class Clock extends Date { static now () { return Date.now() + clockOffset; } }
-  const context = { module: { exports: {} }, exports: {}, __dirname: path.join(work, 'app/libs'), Buffer, URL, URLSearchParams, Date: Clock, setTimeout, clearTimeout, global: globals, require: key => key === './util' ? historyUtil : key === './provider-http' ? { request: async () => { requests++; return Buffer.from(html(row())); } } : nativeRequire(key) };
+  let transportHook = async () => Buffer.from(html(row()));
+  const context = { module: { exports: {} }, exports: {}, __dirname: path.join(work, 'app/libs'), Buffer, URL, URLSearchParams, Date: Clock, setTimeout, clearTimeout, global: globals, require: key => key === './util' ? historyUtil : key === './provider-http' ? { request: async (...args) => { requests++; return transportHook(...args); } } : nativeRequire(key) };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), context, { filename }); const service = context.module.exports;
   service.store.root = path.join(work, 'runtime'); await fs.promises.mkdir(path.join(work, 'torrents'));
+  await test('HR absence selectors are validated before any network request', () => {
+    const c = defaults('HHCLUB', '57d6ce6e'); c.hrAbsence.rowSelectors = ['['];
+    const before = requests; assert.throws(() => service.validate(c), /PROVIDER_SELECTOR_INVALID/); assert.equal(requests, before);
+  });
   // Cross-realm schema uses a strict plain-object test, so pass config through
   // the host module defaults and serialize only in the actual persistence path.
   await test('preview never touches qB or metadata, output excludes credentials and links', async () => {
@@ -223,10 +295,12 @@ async function runtimeTests () {
     await assert.rejects(() => service.begin(rss, []), /PROVIDER_EXTERNAL_FEED_CONFLICT/);
   });
   const torrentBody = bencode.encode({ announce: Buffer.from('https://fixture.invalid/announce'), info: { name: Buffer.from('fixture.bin'), length: 123456, 'piece length': 16384, pieces: Buffer.alloc(160) } });
-  service.register(cfg.rssId, { check: async () => {}, beforePrepare: async () => true, validateFinal: async () => true, prepare: async () => torrentBody });
+  let lifecycleObservations = 0;
+  service.register(cfg.rssId, { check: async () => {}, observe: async (c, rows) => { lifecycleObservations++; assert.equal(rows.length, 1); }, beforePrepare: async () => true, validateFinal: async () => true, prepare: async () => torrentBody });
   let candidate;
   await test('exact metadata precedes native final filters/reservation, then final config is rechecked', async () => {
     const cycle = await service.begin(rss); candidate = cycle.candidates[0]; assert(candidate);
+    assert.equal(lifecycleObservations, 1);
     assert.equal(await service.prepare(rss, candidate, client), true);
     assert.equal(candidate.size, 123456); assert.equal(candidate.sizeExact, true); assert.match(candidate.hash, /^[a-f0-9]{40}$/);
     assert.equal(service.metadata(candidate).size, 123456); await service.finalCheck(rss, candidate, client);
@@ -256,6 +330,7 @@ async function runtimeTests () {
     await assert.rejects(() => service.apply({ config: cfg, expectedRevision: 3, token: 'invalid' }), /PROVIDER_PREVIEW_REQUIRED/);
     const proof = await service.preview(cfg);
     await assert.rejects(() => service.apply({ config: { ...cfg, intervalSeconds: 600 }, expectedRevision: 3, token: proof.token }), /PROVIDER_PREVIEW_REQUIRED/);
+    await assert.rejects(() => service.apply({ config: { ...cfg, listTimeouts: { ...cfg.listTimeouts, readSeconds: 40 } }, expectedRevision: 3, token: proof.token }), /PROVIDER_PREVIEW_REQUIRED/);
     clockOffset = 601000;
     try { await assert.rejects(() => service.apply({ config: cfg, expectedRevision: 3, token: proof.token }), /PROVIDER_PREVIEW_REQUIRED/); } finally { clockOffset = 0; }
     assert.equal(fs.readFileSync(path.join(service.store.root, cfg.rssId + '.json'), 'utf8'), before);
@@ -285,6 +360,59 @@ async function runtimeTests () {
     const proof = await service.preview(other);
     await assert.rejects(() => service.apply({ config: other, expectedRevision: 0, token: proof.token }), /PROVIDER_DUPLICATE_OWNER/);
     assert.equal((await service.store.read(other.rssId)).revision, 0); unregister();
+  });
+  await test('HTML pages use configured timeouts and share one inclusive cycle budget', async () => {
+    clockOffset = 7200000; const options = []; const before = requests;
+    transportHook = async (url, origin, credential, limit, opts) => {
+      assert.equal(new URL(url).pathname, '/torrents.php'); options.push(opts);
+      clockOffset += options.length === 1 ? 55000 : 1000;
+      return Buffer.from(html(row()) + '<a href="/torrents.php?page=1">next</a>');
+    };
+    const c = { ...cfg, pages: 2, listTimeouts: { ...cfg.listTimeouts, cycleSeconds: 70 } };
+    const result = await service.fetchList(c);
+    assert.equal(requests - before, 2); assert.equal(result.coverage.pages.length, 2);
+    assert.equal(options[0].connectTimeoutMs, 15000); assert.equal(options[0].idleTimeoutMs, 30000);
+    assert(options[0].totalTimeoutMs <= 60000 && options[0].totalTimeoutMs > 59000);
+    assert(options[1].totalTimeoutMs <= 15000 && options[1].totalTimeoutMs > 14000);
+  });
+  await test('cycle expiry after parse observer rejects partial results without RSS fallback or extra requests', async () => {
+    const before = requests;
+    transportHook = async () => Buffer.from(html(row()) + '<a href="/torrents.php?page=1">next</a>');
+    await assert.rejects(() => service.fetchList({ ...cfg, pages: 2 }, false, () => { clockOffset += 120001; }), /PROVIDER_CYCLE_DEADLINE/);
+    assert.equal(requests - before, 1);
+  });
+  await test('credential time consumes the same cycle and cannot start HTTP after expiry', async () => {
+    const before = requests;
+    const unregister = service.register('deadfeed', { check: async () => {}, credential: async () => { clockOffset += 120001; return 'never-output'; } });
+    try { await assert.rejects(() => service.fetchList({ ...cfg, rssId: 'deadfeed', credentialRef: 'driver' }), /PROVIDER_CYCLE_DEADLINE/); } finally { unregister(); }
+    assert.equal(requests, before);
+  });
+  await test('transport failure never fetches RSS or adds automatic retry and releases busy gate', async () => {
+    const before = requests;
+    transportHook = async () => { throw Object.assign(Error('PROVIDER_TIMEOUT_BODY'), { code: 'PROVIDER_TIMEOUT_BODY' }); };
+    await assert.rejects(() => service.fetchList(cfg), /PROVIDER_TIMEOUT_BODY/);
+    assert.equal(requests - before, 1);
+    transportHook = async (url, origin, credential, limit, opts) => {
+      assert.equal(new URL(url).pathname, '/torrents.php'); assert(opts.totalTimeoutMs <= 20000); assert.equal(opts.connectTimeoutMs, undefined);
+      return Buffer.from(html(row()));
+    };
+    const old = { ...cfg }; delete old.listTimeouts;
+    assert.equal((await service.fetchList(old)).candidates.length, 1);
+    assert.equal(requests - before, 2); assert.equal(qbCalls, 1); assert.equal(pending.length, 0);
+  });
+  await test('HH fetch consumes one filtered list request and produces no RSS or download request', async () => {
+    const c = defaults('HHCLUB', '57d6ce6e'); c.credentialRef = 'driver';
+    const unregister = service.register(c.rssId, { check: async () => { throw Error('PROVIDER_HHAN_PROOF_MIGRATION_REQUIRED'); }, credential: async () => 'fixture-session' });
+    const before = requests; let observed = 0;
+    transportHook = async (url, origin, credential) => {
+      const u = new URL(url); assert.equal(u.pathname, '/torrents.php'); assert.equal(u.searchParams.get('spstate'), '2'); assert.equal(u.searchParams.get('search_all'), '1'); assert.equal(credential, 'fixture-session');
+      return Buffer.from(hhHtml());
+    };
+    try {
+      const result = await service.fetchList(c, true, () => { observed++; });
+      assert.equal(result.candidates.length, 1); assert.equal(requests - before, 1); assert.equal(observed, 1); assert.equal(qbCalls, 1); assert.equal(pending.length, 0);
+      assert.equal((await service.store.read(c.rssId)).revision, 0); assert.equal(result.candidates[0].hrState, 'unknown');
+    } finally { unregister(); transportHook = null; }
   });
 }
 main().catch(e => { process.stderr.write('PROVIDER_TEST_FAILED ' + (e.code || e.message) + '\n' + e.stack + '\n'); process.exitCode = 1; });
