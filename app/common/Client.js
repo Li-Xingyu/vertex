@@ -72,6 +72,14 @@ class Client {
     this.avgUploadSpeed = 0;
     this.avgDownloadSpeed = 0;
     this.lastCookie = 0;
+    // Explicit opt-in only. The shadow observer cannot pause/delete or replace
+    // the current lifecycle guard; unsupported configuration fails closed.
+    if (client.contentGroups && client.contentGroups.mode === 'shadow') {
+      try {
+        const { ContentGroupShadow } = require('../libs/content-groups/service');
+        this.contentGroupShadow = new ContentGroupShadow(this, client.contentGroups);
+      } catch (_) { logger.error('内容组只读观察器配置无效，未启用'); }
+    }
     logger.info('下载器', this.alias, '初始化完毕');
   };
 
@@ -171,6 +179,7 @@ class Client {
   };
 
   destroy () {
+    if (this.contentGroupShadow) this.contentGroupShadow.close();
     logger.info('销毁下载器实例', this.alias);
     this.maindataJob.stop();
     delete this.maindataJob;

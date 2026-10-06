@@ -20,7 +20,8 @@ async function test (name, fn) {
 
 function makeDatabase (options = {}) {
   const filename = path.join(work, 'case-' + ++sequence + '.db');
-  fs.copyFileSync(path.join(root, 'app/config_backup/sql.db'), filename);
+  const imageTemplate = path.join(root, 'app/config_backup/sql.db');
+  fs.copyFileSync(fs.existsSync(imageTemplate) ? imageTemplate : path.join(root, 'app/config/sql.db'), filename);
   const queue = new DatabaseQueue({ filename, ...options });
   fixtures.add(queue);
   return queue;

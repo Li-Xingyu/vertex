@@ -66,6 +66,8 @@ class ClientMod {
       c.enable = client.enable;
       c.autoDelete = client.autoDelete;
       c.clientUrl = client.clientUrl;
+      const runtime = global.runningClient[client.id];
+      if (runtime && runtime.contentGroupShadow) c.contentGroupShadow = runtime.contentGroupShadow.latest;
       client.status = !!(client.enable && global.runningClient[client.id] && global.runningClient[client.id].status && global.runningClient[client.id].maindata);
       c.status = client.status;
       if (client.status) {
