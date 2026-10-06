@@ -12,9 +12,10 @@
       <div style="margin-top: 32px;">
           说明: <br>
           1. http proxy 格式为 http://192.168.1.1:8080<br>
-          2. domains 指走 http proxy 的域名列表, 一行一个<br>
-          3. 域名需完全匹配, 例: www.baidu.com<br>
-          3. 代理设置不支持绕过 Cloudflare 时使用<br>
+          2. 新站点采集器统一使用上述代理，由代理服务决定直连或节点；留空代理地址则直连<br>
+          3. 下方域名列表仅用于原有请求，一行一个<br>
+          4. 域名需完全匹配, 例: www.baidu.com<br>
+          5. 代理设置不支持绕过 Cloudflare 时使用<br>
       </div>
     </div>
   </div>
