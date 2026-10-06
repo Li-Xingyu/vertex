@@ -27,6 +27,10 @@ COPY app/app.js /app/vertex/app/app.js
 COPY app/common /app/vertex/app/common
 COPY app/controller /app/vertex/app/controller
 COPY app/libs /app/vertex/app/libs
+# Versioned installer payload only. Activation remains an explicit NAS change;
+# image startup must not overwrite persisted policy, history or rule settings.
+COPY app/governance /app/vertex/governance-bundle
+COPY app/libs/content-groups /app/vertex/governance-bundle/content-groups
 COPY --from=lineage_deps /lineage-deps/node_modules /app/vertex/app/vendor/lineage-db/node_modules
 COPY app/model /app/vertex/app/model
 COPY app/routes /app/vertex/app/routes

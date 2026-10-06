@@ -8,6 +8,7 @@ const { Worker } = require('worker_threads');
 const { EventEmitter } = require('events');
 const I = require('../app/libs/content-groups/identity');
 const G = require('../app/libs/content-groups');
+const E = require('../app/libs/content-groups/reclaim');
 const R = require('../app/libs/content-groups/reader');
 const { auditGroup } = require('../app/libs/content-groups/file-audit');
 const { ContentGroupShadow } = require('../app/libs/content-groups/service');
@@ -57,6 +58,44 @@ async function fakeCollect (fixtures, previous, config = {}, lineages = {}) {
 }
 
 async function main () {
+  await test('reclaim adapter binds exact members and never imports a report permit', () => {
+    const a = fixture(0); const b = fixture(1); const now = 1000;
+    const cache = Object.fromEntries([a, b].map(t => [t.row.hash, { ...t, checkedAt: now }]));
+    const proof = E.prepare({ schema: 1, clientId: 'brush', at: now, cache }, [a.row, b.row], 'brush', now);
+    const state = { exactGroups: proof }; const entry = E.structure([a.row, b.row], a.row, state, now);
+    assert(entry.valid); assert.equal(entry.group.length, 2);
+    assert(E.validateManifest(entry, a.row, a.files, 'brush'));
+    assert(!E.validateManifest(entry, a.row, a.files.map(f => ({ ...f, priority: 0 })), 'brush'));
+    assert(!E.permit(entry, { ok: true, members: entry.identity.members }));
+    assert(E.permit(entry, { members: entry.identity.members, groupKey: entry.key, groupRevision: entry.revision }));
+  });
+  await test('reclaim adapter rejects stale snapshot and never uses path fallback', () => {
+    const a = fixture(); const now = 1000;
+    const snapshot = { schema: 1, clientId: 'brush', at: now, cache: { [a.row.hash]: { ...a, checkedAt: now - 661 } } };
+    const state = { exactGroups: E.prepare(snapshot, [a.row], 'brush', now) };
+    const entry = E.structure([a.row], a.row, state, now);
+    assert(entry.bound); assert(!entry.valid); assert(!E.structure([a.row], a.row, {}, now).valid);
+    assert.throws(() => E.prepare({ ...snapshot, at: now - 661 }, [a.row], 'brush', now));
+    assert.throws(() => E.prepare(snapshot, [a.row], 'main', now));
+  });
+  await test('reclaim adapter invalidates readded instances and overlapping new refs', () => {
+    const a = fixture(); const now = 1000;
+    const state = { exactGroups: E.prepare({ schema: 1, clientId: 'brush', at: now, cache: { [a.row.hash]: { ...a, checkedAt: now } } }, [a.row], 'brush', now) };
+    const changed = { ...a.row, added_on: 101 }; assert(!E.structure([changed], changed, state, now).valid);
+    const other = { ...a.row, hash: 'e'.repeat(40), content_path: a.row.content_path + '/nested' };
+    assert(!E.structure([a.row, other], a.row, state, now).valid);
+  });
+  await test('indexed delete scopes preserve sibling isolation and parent protection', () => {
+    const rows = [
+      { hash: 'a', content_path: '/downloads/a' }, { hash: 'b', content_path: '/downloads/ab' },
+      { hash: 'c', content_path: '/downloads/a/inner' }
+    ];
+    const scopes = I.deleteScopes(rows);
+    assert(I.outsideScope(['/downloads/a'], new Set(['a']), scopes));
+    assert(!I.outsideScope(['/downloads/a'], new Set(['a', 'c']), scopes));
+    assert(!I.outsideScope(['/downloads/ab'], new Set(['b']), scopes));
+    assert(I.outsideScope(['/downloads/a'], new Set(['a', 'c']), I.deleteScopes([...rows, { hash: 'd' }])));
+  });
   await test('cross-site raw hashes differ but exact v1 content identity matches', () => {
     const a = fixture(0); const b = fixture(1);
     assert.notEqual(a.row.hash, b.row.hash); assert.equal(a.proof.contentId, b.proof.contentId);

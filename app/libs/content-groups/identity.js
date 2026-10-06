@@ -19,6 +19,29 @@ function absolute (s) {
   s.slice(1).split('/').forEach(component); return s;
 }
 function within (file, root) { return file === root || file.startsWith(root + '/'); }
+// Index deletion scopes once per immutable snapshot, not once per group/rule.
+function deleteScopes (rows) {
+  const byPath = new Map(); const related = new Map(); let unknown = false;
+  for (const row of rows) {
+    const p = row.content_path;
+    if (typeof p !== 'string' || !p) { unknown = true; continue; }
+    if (!byPath.has(p)) byPath.set(p, new Set()); byPath.get(p).add(row.hash);
+  }
+  for (const p of byPath.keys()) {
+    for (let i = p.lastIndexOf('/'); i > 0; i = p.lastIndexOf('/', i - 1)) {
+      const parent = p.slice(0, i);
+      if (!byPath.has(parent)) continue;
+      if (!related.has(p)) related.set(p, new Set()); related.get(p).add(parent);
+      if (!related.has(parent)) related.set(parent, new Set()); related.get(parent).add(p);
+    }
+  }
+  return { byPath, related, unknown };
+}
+function outsideScope (paths, members, scopes) {
+  if (scopes.unknown) return true;
+  return paths.some(p => [p, ...(scopes.related.get(p) || [])].some(q =>
+    [...(scopes.byPath.get(q) || [])].some(h => !members.has(h))));
+}
 function hash (s) { if (typeof s !== 'string' || !/^[a-f0-9]{40}$/.test(s)) fail('HASH'); return s; }
 function key (s) { if (typeof s !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(s)) fail('CLIENT'); return s; }
 
@@ -124,4 +147,4 @@ function current (proof, row, files, clientId) {
   } catch (_) { return false; }
 }
 
-module.exports = { MAX_BYTES, digest, bytesDigest, absolute, within, hash, key, metadata, binding, manifest, identity, current };
+module.exports = { MAX_BYTES, digest, bytesDigest, absolute, within, hash, key, metadata, binding, manifest, identity, current, deleteScopes, outsideScope };

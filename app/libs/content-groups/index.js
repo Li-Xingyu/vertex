@@ -34,6 +34,7 @@ function buildIndex (tasks, clientId) {
     }
     if (!oldPaths.has(row.content_path)) oldPaths.set(row.content_path, new Set()); oldPaths.get(row.content_path).add(id);
   }
+  const scopes = I.deleteScopes(tasks.map(t => t.row));
   for (const group of groups.values()) {
     group.members.sort(); const members = new Set(group.members);
     for (const [file] of group.files) {
@@ -41,13 +42,7 @@ function buildIndex (tasks, clientId) {
     }
     // qB deletion may also clean a containing directory. Unknown manifests and
     // parent/child scopes must remain protective, not silently ignored.
-    for (const t of tasks) {
-      if (members.has(t.row.hash)) continue;
-      for (const p of group.paths) {
-        const q = t.row.content_path;
-        if (typeof p !== 'string' || typeof q !== 'string' || !p || !q || I.within(p, q) || I.within(q, p)) group.reasons.add('external_delete_scope');
-      }
-    }
+    if (I.outsideScope([...group.paths], members, scopes)) group.reasons.add('external_delete_scope');
     group.revision = I.digest(group.members.map(h => {
       const t = byHash.get(h); return [h, t.row.added_on, t.proof && t.proof.binding, t.proof && t.proof.manifestDigest];
     }));

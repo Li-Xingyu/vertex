@@ -17,6 +17,7 @@ const clients = {
 class Client {
   constructor (client) {
     this._client = client;
+    this.supportsConfirmedGroupHistory = true;
     this.id = client.id;
     this.status = false;
     this.client = clients[client.type];
@@ -492,10 +493,12 @@ class Client {
           logger.info(torrent.name, '重新汇报完毕, 等待 2s');
           await util.sleep(2000);
           logger.info(torrent.name, '等待 2s 完毕, 执行删种');
-          await util.runRecord('update torrents set size = ?, tracker = ?, upload = ?, download = ?, delete_time = ?, record_note = ? where hash = ?',
-            [torrent.size, torrent.tracker, torrent.uploaded, torrent.downloaded, moment().unix(), `删种规则: ${rule.alias}`, torrent.hash]);
-          await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
-            [torrent.hash, torrent.uploaded, torrent.downloaded, moment().unix()]);
+          if (!this.groupDeleteOwnsHistory || !this.groupDeleteOwnsHistory.has(rule.id)) {
+            await util.runRecord('update torrents set size = ?, tracker = ?, upload = ?, download = ?, delete_time = ?, record_note = ? where hash = ?',
+              [torrent.size, torrent.tracker, torrent.uploaded, torrent.downloaded, moment().unix(), `删种规则: ${rule.alias}`, torrent.hash]);
+            await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
+              [torrent.hash, torrent.uploaded, torrent.downloaded, moment().unix()]);
+          }
           const deleteFiles = await this.deleteTorrent(torrent, rule);
           deletedTorrentHash.push(torrent.hash);
           if (!deleteFiles) {
