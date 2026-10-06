@@ -414,5 +414,73 @@ async function runtimeTests () {
       assert.equal((await service.store.read(c.rssId)).revision, 0); assert.equal(result.candidates[0].hrState, 'unknown');
     } finally { unregister(); transportHook = null; }
   });
+  await test('all ten independent profiles including MT can acquire concurrently', async () => {
+    clockOffset += 3600000;
+    let release; let entered = 0;
+    const gate = new Promise(resolve => { release = resolve; });
+    const hold = async () => { entered++; await gate; throw Object.assign(Error('fixture-body-timeout'), { code: 'PROVIDER_TIMEOUT_BODY' }); };
+    transportHook = hold;
+    const unregister = []; const before = requests;
+    const configs = Object.keys(profiles).map((profile, i) => {
+      const c = defaults(profile, (0xabc00000 + i).toString(16)); c.credentialRef = 'driver';
+      unregister.push(service.register(c.rssId, {
+        check: async () => {},
+        credential: async () => 'fixture-session',
+        list: async (c, options) => { await options.charge(); return hold(); },
+        prepare: async () => torrentBody
+      }));
+      return c;
+    });
+    const settled = Promise.allSettled(configs.map(c => service.fetchList(c)));
+    try {
+      for (let i = 0; i < 300 && entered < configs.length; i++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(entered, 10); assert.equal(requests - before, 9);
+      release();
+      const outcomes = await settled;
+      assert(outcomes.every(x => x.status === 'rejected' && x.reason.code === 'PROVIDER_TIMEOUT_BODY'));
+      for (const c of configs) assert.equal(JSON.parse(fs.readFileSync(path.join(service.store.root, 'budget-' + c.profile + '.json'))).list, 1);
+    } finally { release(); await settled; unregister.forEach(fn => fn()); }
+  });
+  await test('same-site overlap skips a scheduled cycle without failure backoff or budget consumption', async () => {
+    clockOffset += 3600000; await service.store.apply(cfg, (await service.store.read(cfg.rssId)).revision, async () => {});
+    transportHook = async () => { throw Object.assign(Error('timeout'), { code: 'PROVIDER_TIMEOUT_BODY' }); };
+    await assert.rejects(() => service.begin(rss), /PROVIDER_TIMEOUT_BODY/);
+    const status = async () => (await service.list()).records.find(r => r.id === cfg.rssId).status;
+    assert.equal((await status()).failures, 1);
+    clockOffset += 3600000;
+    let release; let entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const ready = new Promise(resolve => { entered = resolve; });
+    transportHook = async () => { entered(); await gate; return Buffer.from(html(row())); };
+    const held = service.preview(cfg);
+    try {
+      await ready;
+      const file = path.join(service.store.root, 'budget-CARPT.json'); const bytes = fs.readFileSync(file, 'utf8');
+      const before = requests; const at = Clock.now();
+      const skipped = await service.begin(rss);
+      assert.equal(skipped.candidates.length, 0); assert.equal(skipped.deferred, 'same-site-busy');
+      assert.equal((await status()).failures, 1); assert.equal((await status()).error, 'PROVIDER_TIMEOUT_BODY');
+      assert((await status()).nextAttempt <= at + cfg.intervalSeconds * 1000 + 100);
+      await assert.rejects(() => service.preview(cfg), /PROVIDER_BUSY/);
+      assert.equal(requests, before); assert.equal(fs.readFileSync(file, 'utf8'), bytes);
+    } finally { release(); await held; }
+    clockOffset += cfg.intervalSeconds * 1000 + 1000;
+    const completed = await service.begin(rss); assert.equal(completed.candidates.length, 1);
+    assert.equal((await status()).failures, 0); assert.equal((await status()).error, null);
+    assert.equal(qbCalls, 1); assert.equal(pending.length, 0);
+  });
+  await test('remote 429 still blocks its own site and preserves retry-after', async () => {
+    clockOffset += 3600000;
+    transportHook = async () => { throw Object.assign(Error('rate-limit'), { code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 900 }); };
+    const before = requests; const at = Clock.now();
+    await assert.rejects(() => service.begin(rss), /PROVIDER_RATE_LIMIT/);
+    const s = (await service.list()).records.find(r => r.id === cfg.rssId).status;
+    assert.equal(s.failures, 1); assert(s.nextAttempt >= at + 900000);
+    await assert.rejects(() => service.fetchList(cfg), /PROVIDER_RATE_LIMIT/);
+    assert.equal(requests - before, 1);
+    clockOffset += 901000; transportHook = async () => Buffer.from(html(row()));
+    assert.equal((await service.begin(rss)).candidates.length, 1);
+    assert.equal(qbCalls, 1);
+  });
 }
 main().catch(e => { process.stderr.write('PROVIDER_TEST_FAILED ' + (e.code || e.message) + '\n' + e.stack + '\n'); process.exitCode = 1; });

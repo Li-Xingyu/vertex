@@ -12,7 +12,7 @@ const { infoSlice } = require('./provider-torrent');
 
 const store = new ProviderStore();
 const bridges = new Map(); const proofs = new Map(); const states = new Map(); const busy = new Set();
-const prepared = new WeakMap(); let networking = 0;
+const prepared = new WeakMap();
 const terminalHistory = new Map();
 const contextKey = Symbol('vertex-provider-context');
 const backoffUntil = new Map();
@@ -66,8 +66,10 @@ async function fetchList (c, preview = false, observe) {
   if (observe !== undefined && typeof observe !== 'function') fail('PROVIDER_OBSERVER_INVALID');
   const p = profiles[c.profile]; const owner = bridge(c);
   if (Date.now() < (backoffUntil.get(c.profile) || 0)) fail('PROVIDER_RATE_LIMIT');
-  if (busy.has(c.profile) || networking >= 3) fail('PROVIDER_BUSY');
-  busy.add(c.profile); networking++;
+  // Independent sites do not share a concurrency quota. Keep only per-profile
+  // exclusion; each source retains its own request budget and timeouts.
+  if (busy.has(c.profile)) fail('PROVIDER_BUSY');
+  busy.add(c.profile);
   try {
     if (p.adapter === 'mteam-api') {
       if (!owner || !owner.list || !owner.prepare) fail('PROVIDER_DRIVER_REQUIRED');
@@ -114,7 +116,7 @@ async function fetchList (c, preview = false, observe) {
   } catch (e) {
     if (e.code === 'PROVIDER_RATE_LIMIT' || e.retryAfterSeconds > 0) backoffUntil.set(c.profile, Date.now() + Math.max(c.intervalSeconds, Math.min(86400, Number(e.retryAfterSeconds) || 0)) * 1000);
     throw e;
-  } finally { busy.delete(c.profile); networking--; }
+  } finally { busy.delete(c.profile); }
 }
 function summary (candidate, c) {
   const { candidateKey, name, size, seeders, leechers, pubTime, fetchedAt, downloadFactor, uploadFactor, downloadUntil, uploadUntil, downloadUnlimited, uploadUnlimited, hrState, hrEvidence } = candidate;
@@ -197,6 +199,10 @@ async function begin (rss, supplied) {
     }
     return { candidates };
   } catch (e) {
+    // A preview/other cycle already owns this site. Skip this scheduled cycle
+    // at its normal cadence, without counting a remote failure or clearing any
+    // previous remote error. No request/budget was consumed by the busy gate.
+    if (e.code === 'PROVIDER_BUSY') return { candidates: [], deferred: 'same-site-busy' };
     s.error = cleanCode(e); s.failures++;
     s.nextAttempt = now + Math.max(Math.min(86400000, Math.max(0, Number(e.retryAfterSeconds) || 0) * 1000), Math.min(3600000, c.intervalSeconds * 1000 * 2 ** Math.min(s.failures, 4)));
     // Old observations may remain visible but can never drive a new admission.
