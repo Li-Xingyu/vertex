@@ -16,7 +16,8 @@ class ContentGroupShadow {
     options.roots.forEach(absolute);
     this.maxTasks = Math.min(64, Math.max(1, Number.isSafeInteger(options.maxTasks) ? options.maxTasks : 32));
     this.timeoutMs = 45000;
-    const intervalMs = Math.max(300000, Number.isSafeInteger(options.intervalMs) ? options.intervalMs : 300000);
+    if (options.lineageSource && !['database', 'file'].includes(options.lineageSource)) throw Error('CG_LINEAGE_SOURCE');
+    const intervalMs = options.lineageSource === 'database' ? 30000 : Math.max(300000, Number.isSafeInteger(options.intervalMs) ? options.intervalMs : 300000);
     this.timer = setInterval(() => this.tick(), intervalMs); this.timer.unref();
     this.first = setTimeout(() => this.tick(), 15000); this.first.unref();
   }
@@ -35,7 +36,8 @@ class ContentGroupShadow {
           connection: { url: this.client.clientUrl, cookie: this.client.cookie },
           stateFile: path.join(__dirname, '../../data/content-groups', this.client.id + '-shadow.json'),
           fileMappings: Array.isArray(this.options.fileMappings) ? this.options.fileMappings : [],
-          lineageDirectory: typeof this.options.lineageDirectory === 'string' ? this.options.lineageDirectory : null
+          lineageDirectory: typeof this.options.lineageDirectory === 'string' ? this.options.lineageDirectory : null,
+          lineageSource: this.options.lineageSource || 'file'
         },
         resourceLimits: { maxOldGenerationSizeMb: 192 }
       });

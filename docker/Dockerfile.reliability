@@ -10,6 +10,12 @@ ENV VERTEX_REVISION=${VERTEX_REVISION} VERTEX_BUILD_TIME=${VERTEX_BUILD_TIME}
 RUN node prepare-theme.js && npx vue-cli-service build
 
 # Keep the deployed runtime/SQLite ABI and official PUID/PGID entrypoint.
+FROM node:22.5.1-alpine AS lineage_deps
+WORKDIR /lineage-deps
+COPY docker/lineage-db/package.json docker/lineage-db/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+# Isolate the connector dependencies; do not replace the existing app modules.
 # That entrypoint drops to vt after initialising the existing /vertex volume;
 # switching USER here would break its permission/bootstrap contract.
 FROM lswl/vertex@sha256:25104a02b345108e8c7cb2dfbf81a4e5fd38c5d839371584e75629816f06d62f
@@ -21,6 +27,7 @@ COPY app/app.js /app/vertex/app/app.js
 COPY app/common /app/vertex/app/common
 COPY app/controller /app/vertex/app/controller
 COPY app/libs /app/vertex/app/libs
+COPY --from=lineage_deps /lineage-deps/node_modules /app/vertex/app/vendor/lineage-db/node_modules
 COPY app/model /app/vertex/app/model
 COPY app/routes /app/vertex/app/routes
 COPY app/config /app/vertex/app/config_backup

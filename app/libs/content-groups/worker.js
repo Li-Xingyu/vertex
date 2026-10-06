@@ -7,6 +7,7 @@ const { auditGroup } = require('./file-audit');
 
 async function main () {
   const options = workerData;
+  const started = Date.now();
   if (options.mode !== 'shadow') throw Error('CG_SHADOW_ONLY');
   let previous = {};
   try {
@@ -14,9 +15,27 @@ async function main () {
     if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 32 * 1024 * 1024) previous = JSON.parse(await fs.promises.readFile(options.stateFile, 'utf8'));
   } catch (_) {}
   if (previous.schema !== 1 || previous.clientId !== options.clientId) previous = {};
-  const budget = { calls: 0, maxCalls: 2 + 2 * options.maxTasks, deadline: Date.now() + options.timeoutMs - 1000, readbackReserveMs: 6000 };
-  const state = await collect({ ...options, workDeadline: budget.deadline - budget.readbackReserveMs },
-    qbitReader(options.connection, budget), previous, h => readLineage(options.lineageDirectory, h));
+  let events; let lineage = h => readLineage(options.lineageDirectory, h);
+  if (options.lineageSource === 'database') {
+    const L = require('./lineage-db');
+    const mysql = require('../../vendor/lineage-db/node_modules/mysql2/promise');
+    const config = await L.readConfig(path.join(path.dirname(options.stateFile), options.clientId + '-lineage-db.json'));
+    events = await L.readEvents(config, options.clientId, previous.lineageDb, cfg => mysql.createConnection(cfg));
+    const byMember = L.byMember(events.state);
+    lineage = async h => byMember.get(h);
+  }
+  const budget = { calls: 0, maxCalls: 2 + 2 * options.maxTasks, deadline: started + options.timeoutMs - 1000, readbackReserveMs: 6000 };
+  const state = await collect({ ...options, incremental: !!events, priorityHashes: events && events.priority, workDeadline: budget.deadline - budget.readbackReserveMs },
+    qbitReader(options.connection, budget), previous, lineage);
+  if (events) {
+    // Cursor and accepted relation records publish atomically with the qB state.
+    // Failed worker/state writes replay the page; nothing is acknowledged in DB.
+    state.lineageDb = events.state; state.report.lineageDb = events.report;
+    const present = new Set(state.report.groups.flatMap(g => g.members));
+    for (const [h, r] of Object.entries(state.lineageDb.records)) {
+      if (!r.members.some(b => present.has(b.hash))) delete state.lineageDb.records[h];
+    }
+  }
   if (Array.isArray(options.fileMappings) && options.fileMappings.length) {
     state.report.physicalAudit = 'partial_shadow';
     state.report.fileAudits = {};
@@ -46,6 +65,8 @@ async function main () {
     selected: state.report.selected,
     metadataExports: state.report.metadataExports,
     lineageHits: state.report.lineageHits,
+    lineageDb: state.report.lineageDb,
+    incremental: state.report.incremental,
     mode: 'shadow',
     deleteAuthorized: false,
     calls: budget.calls

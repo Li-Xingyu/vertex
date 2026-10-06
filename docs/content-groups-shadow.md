@@ -84,3 +84,37 @@ Before any subsequent active cutover, implement and verify: complete physical na
 For this shadow stage, remove the opt-in `contentGroups` config and disable IYUU `lineage.enabled`, then restore the exact prior image/hook if required. Keep the old auditor and cleanup chain throughout. Shadow caches and relation records can remain inert; no cleanup operation is required for rollback. Never feed shadow state into the old audit reader.
 
 No claim is made that reverting code restores files deleted by an active engine; this stage has no deletion capability.
+
+## 🗄️ Database relation transport (opt-in)
+
+The database transport replaces the relation-file handoff, not the existing cleanup engine. It remains shadow-only. The companion IYUU hook appends verified source/target proofs to two dedicated tables in its existing MariaDB database; Vertex only reads those tables. It does not infer relationships from historical `cn_reseed.status=Success` rows. No additional daemon or database server is required.
+
+| Setting or bound | Database mode |
+| --- | --- |
+| Client configuration | `contentGroups.lineageSource: "database"` |
+| Legacy mode | Omit `lineageSource`, or set `"file"`; existing behavior remains |
+| Hook configuration | `lineage.transport: "database"`; file is the legacy default |
+| Tables | `cn_vertex_lineage_stream`, `cn_vertex_lineage` |
+| Vertex account | SELECT on exactly these two tables; no IYUU administrative credentials |
+| Private connection file | `app/data/content-groups/<client-id>-lineage-db.json`, mode 0600, regular single-link file |
+| Connection fields | `host`, integer `port`, `database`, `user`, `password`; optional trusted `ca` for TLS |
+| Polling | 30 seconds; one worker per downloader, overlapping runs skipped |
+| Event page | At most 128 ordered records per poll |
+| qB metadata work | Existing `maxTasks`, default 32; no payload reads |
+| Time bounds | DB connect 2 seconds, query 3 seconds, total DB read 10 seconds; whole worker 45 seconds |
+| History | Counter continuity checked each snapshot; persisted samples at five-minute spacing |
+
+Keep connection secrets out of client configuration, source control, UI responses and logs. Provision the connection file through the deployment secret channel; do not paste a credential-bearing example into documentation. The isolated `mysql2` dependency is pinned without replacing the official runtime's modules or SQLite ABI.[^db1]
+
+The writer serializes event-ID allocation through commit with a named database lock. An auto-increment ID alone is not a commit-order cursor: a later ID could become visible before an earlier transaction commits. Duplicate proofs are idempotent. Vertex uses a read-only transaction, validates record digests and task-instance bindings, then atomically persists its cursor together with the accepted records and qB work queue. Failed state writes replay the page; no acknowledgment is written into IYUU. A changed stream epoch or missing cursor anchor reports an error instead of silently restarting at zero.[^db2]
+
+The first task snapshot establishes a baseline, **not a historical backfill queue**. New/re-added/moved tasks, newly received relation members and stale already-known identities are maintained incrementally. Both source and target are scheduled when a proof arrives; a capped batch preserves unprocessed work. Historical identity backfill must use a separately reviewed one-time migration. This change does not implement that migration or guarantee full-client coverage within a fixed time.
+
+Deployment must explicitly create and verify the schema before enabling the hook; it never runs DDL inside a reseed callback. Verify database connectivity and a SELECT-only account before enabling Vertex database mode. If the existing database listens only on loopback, network/listener changes require separate approval: do not publish a host database port or reuse root credentials. Keep the old relation files intact for rollback, but do not dual-write by default.
+
+Additional local checks: `test/content-groups-db.js` and `test/content-groups-db-integration.js`. The latter requires an explicitly enabled disposable MariaDB fixture and never accepts production assets. The private companion tests cover commit ordering, duplicate writes, permissions and failure after an otherwise successful reseed. Database-write failure must not pause or recheck that successful task; it leaves the relation unproved until separately repaired.
+
+For rollback, restore the exact prior image/hook and file-mode configuration (or disable shadow observation). Preserve the previous files and mounts. The new tables may remain inert; do not drop data to perform a code rollback. Successful local tests are not evidence of deployment or a natural production reseed being consumed.
+
+[^db1]: mysql2 official documentation. https://sidorares.github.io/node-mysql2/docs
+[^db2]: MariaDB, GET_LOCK. Named locks are connection-scoped and must be explicitly released after the transaction. https://mariadb.com/docs/server/reference/sql-functions/secondary-functions/miscellaneous-functions/get_lock

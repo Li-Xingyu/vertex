@@ -102,10 +102,11 @@ function observe (previous, tasks, index, now, maxGapSeconds = 660) {
     if (counters.some(c => c.slice(1).some(n => !Number.isSafeInteger(n) || n < 0))) continue;
     const up = counters.reduce((s, c) => s + c[1], 0); const down = counters.reduce((s, c) => s + c[2], 0);
     const old = previous && previous[g.id];
-    const valid = old && old.revision === g.revision && now > old.at && now - old.at <= maxGapSeconds &&
+    const valid = old && old.revision === g.revision && now >= old.at && now - old.at <= maxGapSeconds &&
       counters.every((c, i) => old.counters[i] && c[0] === old.counters[i][0] && c[1] >= old.counters[i][1] && c[2] >= old.counters[i][2]);
     const samples = valid ? old.samples.filter(s => now - s.at <= 13 * 3600) : [];
-    samples.push({ at: now, up, down });
+    // Polling changes every 30s must not expand the retained 13h history 10x.
+    if (!samples.length || now - samples[samples.length - 1].at >= 300) samples.push({ at: now, up, down });
     result[g.id] = { revision: g.revision, at: now, counters, samples, reset: !valid };
   }
   return result;

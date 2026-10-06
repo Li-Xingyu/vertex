@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const I = require('./identity');
 const G = require('./index');
+const incremental = require('./incremental');
 
 // No mutation endpoint, site API, proxy, redirect, shell or Docker socket.
 function qbitReader (connection, budget) {
@@ -95,7 +96,8 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
   // Cached manifests are usable only in this shadow report, never deletion. Each
   // selected task is re-read. The cursor guarantees eventual cold-cache coverage.
   const cursor = Number.isSafeInteger(previous.cursor) ? previous.cursor % Math.max(1, eligible.length) : 0;
-  const selected = [...eligible.slice(cursor), ...eligible.slice(0, cursor)].slice(0, maxTasks);
+  const delta = options.incremental ? incremental.plan(eligible, previous, options.priorityHashes, now, maxTasks) : null;
+  const selected = delta ? delta.selected : [...eligible.slice(cursor), ...eligible.slice(0, cursor)].slice(0, maxTasks);
   const cache = {}; const errors = {}; let exportCount = 0; let lineageHits = 0;
   let processed = 0;
   for (const row of eligible) {
@@ -117,8 +119,10 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
       if (!proof) { proof = lineageProof(await loadLineage(row.hash), row, files, clientId, now); if (proof) lineageHits++; }
       if (!proof) { exportCount++; proof = I.identity(await get('export', row.hash), row, files, clientId); }
       cache[row.hash] = { row, files, proof, checkedAt: now };
+      if (delta) delete delta.pending[row.hash];
     } catch (e) {
       const code = /^CG_[A-Z_]+$/.test(e.message) ? e.message : 'CG_UNPROVED'; errors[code] = (errors[code] || 0) + 1;
+      if (delta) delta.pending[row.hash] = { ...delta.pending[row.hash], due: now + 300 };
     }
   }
   const allAfter = await get('info');
@@ -145,6 +149,7 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
     at: now,
     clientId,
     cursor: (cursor + processed) % Math.max(1, eligible.length),
+    ...(delta ? { incremental: { known: delta.known, pending: delta.pending } } : {}),
     cache,
     observations,
     report: {
@@ -154,6 +159,7 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
       selected: processed,
       metadataExports: exportCount,
       lineageHits,
+      ...(delta ? { incremental: { pending: Object.keys(delta.pending).length, historicalBackfill: false } } : {}),
       coverage: {
         eligible: eligible.length,
         allClientTasks: after.length,

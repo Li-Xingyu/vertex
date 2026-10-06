@@ -1,0 +1,6 @@
+{
+  "name": "vertex-lineage-db-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": { "mysql2": "3.24.5" }
+}
