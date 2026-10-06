@@ -11,7 +11,8 @@ Module._load = function (name, ...args) {
   if (name === '/app/vertex/app/libs/util') return { runRecord: async (...x) => records.push(x) };
   return realLoad.call(this, name, ...args);
 };
-const P = require('../app/governance/vertex-lifecycle-policy'); const D = require('../app/governance/vertex-group-delete-guard'); const A = require('../app/governance/audit-vertex-lifecycle');
+const bundle = require('fs').existsSync(path.join(__dirname, '../governance-bundle')) ? '../governance-bundle' : '../app/governance';
+const P = require(bundle + '/vertex-lifecycle-policy'); const D = require(bundle + '/vertex-group-delete-guard'); const A = require(bundle + '/audit-vertex-lifecycle');
 const now = Math.floor(Date.now() / 1000); const clientId = '3dfcd430'; let passed = 0;
 function clone (x) { return JSON.parse(JSON.stringify(x)); }
 function enc (x) {
