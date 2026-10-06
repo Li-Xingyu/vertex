@@ -238,8 +238,8 @@ function liveUploaded(group,history,seconds,now,state){
   // uploader has already become idle again. Counter rollback/new refs protect.
   return observed+extra;
 }
-function liveWindowLow(group,state,now){
-  const complete=hadComplete(group,state),up=liveUploaded(group,state.history?.[groupKey(group,group[0],state,now)],complete?7200:1800,now,state);
+function liveWindowLow(group,state,now,key){
+  const complete=hadComplete(group,state),up=liveUploaded(group,state.history?.[key],complete?7200:1800,now,state);
   return up!==null&&up<(complete?128:32)*1024**2;
 }
 function liveGroupLow(group){
@@ -293,10 +293,10 @@ function noHrYieldPermit(rows,t,state,now=Date.now()/1000) {
   return Number.isFinite(up)&&up!==null&&up<(complete?192:64)*1024**2;
 }
 function groupLowYield(rows,t,state,now=Date.now()/1000) {
-  const group=structural(rows,t,now,state).group;
+  const structure=structural(rows,t,now,state),group=structure.group;
   return liveGroupLow(group)&&(legacyLowYield(rows,t,state,now)||
     state?.yieldPolicyRevision===YIELD_REVISION&&noHrYieldCandidate(rows,t,state,now))&&
-    (state?.yieldPolicyRevision!==YIELD_REVISION||liveWindowLow(group,state,now));
+    (state?.yieldPolicyRevision!==YIELD_REVISION||liveWindowLow(group,state,now,structure.key));
 }
 function auditPermit(group,audit,now) {
   return group.length>0&&audit?.ok===true&&Array.isArray(audit.members)&&now>=audit.time&&now-audit.time<=660&&group.every(x=>
@@ -338,7 +338,9 @@ function promotionSafetyPause(rows,t,state,now=Date.now()/1000,proof) {
   if(fresh(state,now)&&t.category==='HHCLUB'&&Number(t.progress)<1&&['downloading','stalledDL'].includes(t.state)&&
     // Native pause rule has a 1800s continuous fit gate: begin an hour early
     // so the intended actual stop remains about 30 minutes before promotion.
-    hh&&Number.isFinite(hh.until)&&now+3600>=hh.until){const p=structural(rows,t,now,state);if(safePath(p.path)&&!p.overlap&&!p.group.some(x=>Number(x.progress)===1))return true;}
+    // Promotion expiry is NOT reclamation. Preserve its existing physical-scope
+    // stop-loss even if the read-only identity observer is incomplete/stale.
+    hh&&Number.isFinite(hh.until)&&now+3600>=hh.until){const p=structural(rows,t,now);if(safePath(p.path)&&!p.overlap&&!p.group.some(x=>Number(x.progress)===1))return true;}
   return false;
 }
 function slowPause(rows,t,state,now=Date.now()/1000) {

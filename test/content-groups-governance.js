@@ -197,6 +197,12 @@ async function run () {
   await test('old native scheduler cannot activate exact drain', async () => {
     const c = fixture(); delete c.supportsConfirmedGroupHistory; D.install(c); assert(!await c.deleteTorrent(rows[0], { id: D.RID })); assert.equal(calls.length, 0);
   });
+  await test('identity availability cannot suppress existing promotion expiry stop-loss', () => {
+    fixture(); rows = [{ ...rows[0], category: 'HHCLUB', progress: 0.5, state: 'downloading' }];
+    state.exactGroups = null;
+    assert(P.promotionSafetyPause(rows, rows[0], state, now, { until: now + 60 }));
+    assert(!P.decision(rows, rows[0], state, now).allCleanup);
+  });
   await test('identity-keyed fence keeps existing IYUU path and member contract', () => {
     fixture(); const groups = P.groupEntries(rows, state, now); const f = A.buildFence(state, groups, {}); const key = groups[0].key;
     assert.equal(f[key].path, '/downloads/content'); assert.equal(f[key].members.length, 2);
