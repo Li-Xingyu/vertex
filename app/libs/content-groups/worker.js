@@ -15,6 +15,9 @@ async function main () {
     if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 32 * 1024 * 1024) previous = JSON.parse(await fs.promises.readFile(options.stateFile, 'utf8'));
   } catch (_) {}
   if (previous.schema !== 1 || previous.clientId !== options.clientId) previous = {};
+  // Optional nomination from the existing auditor. Missing/stale/malformed
+  // hints only remove priority; they cannot confer identity or delete rights.
+  const refreshHints = await require('./incremental').readRefreshHints(options.stateFile, options.clientId);
   let events; let lineage = h => readLineage(options.lineageDirectory, h);
   if (options.lineageSource === 'database') {
     const L = require('./lineage-db');
@@ -25,7 +28,7 @@ async function main () {
     lineage = async h => byMember.get(h);
   }
   const budget = { calls: 0, maxCalls: 2 + 2 * options.maxTasks, deadline: started + options.timeoutMs - 1000, readbackReserveMs: 6000 };
-  const state = await collect({ ...options, incremental: !!events, priorityHashes: events && events.priority, workDeadline: budget.deadline - budget.readbackReserveMs },
+  const state = await collect({ ...options, refreshHints, incremental: !!events, priorityHashes: events && events.priority, workDeadline: budget.deadline - budget.readbackReserveMs },
     qbitReader(options.connection, budget), previous, lineage);
   if (events) {
     // Cursor and accepted relation records publish atomically with the qB state.

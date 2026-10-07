@@ -96,7 +96,7 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
   // Cached manifests are usable only in this shadow report, never deletion. Each
   // selected task is re-read. The cursor guarantees eventual cold-cache coverage.
   const cursor = Number.isSafeInteger(previous.cursor) ? previous.cursor % Math.max(1, eligible.length) : 0;
-  const delta = options.incremental ? incremental.plan(eligible, previous, options.priorityHashes, now, maxTasks) : null;
+  const delta = options.incremental ? incremental.plan(eligible, previous, options.priorityHashes, now, maxTasks, options.refreshHints, clientId) : null;
   const selected = delta ? delta.selected : [...eligible.slice(cursor), ...eligible.slice(0, cursor)].slice(0, maxTasks);
   const cache = {}; const errors = {}; let exportCount = 0; let lineageHits = 0;
   let processed = 0;
@@ -149,7 +149,7 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
     at: now,
     clientId,
     cursor: (cursor + processed) % Math.max(1, eligible.length),
-    ...(delta ? { incremental: { known: delta.known, pending: delta.pending } } : {}),
+    ...(delta ? { incremental: { known: delta.known, pending: delta.pending, turn: delta.turn } } : {}),
     cache,
     observations,
     report: {
@@ -159,7 +159,7 @@ async function collect (options, get, previous = {}, loadLineage = async () => n
       selected: processed,
       metadataExports: exportCount,
       lineageHits,
-      ...(delta ? { incremental: { pending: Object.keys(delta.pending).length, historicalBackfill: false } } : {}),
+      ...(delta ? { incremental: { pending: Object.keys(delta.pending).length, historicalBackfill: false, refresh: delta.refresh } } : {}),
       coverage: {
         eligible: eligible.length,
         allClientTasks: after.length,

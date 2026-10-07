@@ -112,10 +112,10 @@ function partialRetirable(rows,t,state,now=Date.now()/1000) {
       number(x,'uploadSpeed','upspeed')===0 && number(x,'downloadSpeed','dlspeed')===0 &&
       number(x,'leecher','num_leechs')===0 && number(x,'addedTime','added_on')>0 && now-number(x,'addedTime','added_on')>=7*86400);
 }
-function structural(rows, t, now = Date.now()/1000,state) {
+function structural(rows, t, now = Date.now()/1000,state,refreshOnly=false) {
   const path=cp(t),entry=exactMode(state)?exactEngine().structure(rows,t,state,now):null;
   const index=entry?null:contentIndex(rows),group=entry?entry.group:index.groups.get(path)||[];
-  const overlap=entry?!entry.valid:index.overlaps.has(path);
+  const overlap=entry?!(refreshOnly?entry.refreshable:entry.valid):index.overlaps.has(path);
   const complete = safePath(path) && !overlap && group.length > 0 && group.every(x => {
     const completion = number(x,'completedTime','completion_on');
     return managed(x) && Number(x.progress)===1 && hrMet(x) &&
@@ -205,9 +205,9 @@ function hhIdlePeers(group,state,history,now) {
   return down!==null&&down<=1024**2&&partial.every(x=>
     number(x,'downloadSpeed','dlspeed')===0&&number(x,'seeder','num_seeds')===0);
 }
-function legacyLowYield(rows,t,state,now=Date.now()/1000) {
+function legacyLowYield(rows,t,state,now=Date.now()/1000,refreshOnly=false) {
   if(!fresh(state,now))return false;
-  const p=structural(rows,t,now,state),key=p.key,h=state.history?.[key];
+  const p=structural(rows,t,now,state,refreshOnly),key=p.key,h=state.history?.[key];
   const hhIdle=hhIdlePeers(p.group,state,h,now);
   if(!safePath(p.path)||p.overlap||!p.group.length||!p.group.every(x=>
     managed(x)&&hrMet(x,hostsFor(x,state))&&sameContent(x,t,state)&&
@@ -252,9 +252,9 @@ function liveGroupLow(group){
 }
 // Screening is inexpensive. A primary tracker may nominate a group for audit,
 // but only ALL real audited trackers can permit the connected-peer exit path.
-function noHrYieldCandidate(rows,t,state,now=Date.now()/1000) {
+function noHrYieldCandidate(rows,t,state,now=Date.now()/1000,refreshOnly=false) {
   if(!fresh(state,now))return false;
-  const p=structural(rows,t,now,state),key=p.key,h=state.history?.[key];
+  const p=structural(rows,t,now,state,refreshOnly),key=p.key,h=state.history?.[key];
   if(!safePath(p.path)||p.overlap||!liveGroupLow(p.group)||!p.group.every(x=>{
     const hs=state.audits?.[key]?.trackers?.[x.hash]||hostsFor(x,state);
     return managed(x)&&hs.length>0&&hs.every(v=>hostNoHr(x,v))&&
@@ -301,6 +301,15 @@ function groupLowYield(rows,t,state,now=Date.now()/1000) {
   return liveGroupLow(group)&&(legacyLowYield(rows,t,state,now)||
     state?.yieldPolicyRevision===YIELD_REVISION&&noHrYieldCandidate(rows,t,state,now))&&
     (state?.yieldPolicyRevision!==YIELD_REVISION||liveWindowLow(group,state,now,structure.key));
+}
+// Only nominates work to the read-only metadata observer. Never called by
+// decision()/auditPermit()/the delete guard; no timestamp or permit is forged.
+function refreshCandidate(rows,t,state,now=Date.now()/1000){
+  if(!exactMode(state)||!fresh(state,now)||!state.allSiteEnabled||!state.otherRootProtected)return false;
+  const p=structural(rows,t,now,state,true);
+  return !p.overlap&&liveGroupLow(p.group)&&
+    (legacyLowYield(rows,t,state,now,true)||state.yieldPolicyRevision===YIELD_REVISION&&noHrYieldCandidate(rows,t,state,now,true))&&
+    (state.yieldPolicyRevision!==YIELD_REVISION||liveWindowLow(p.group,state,now,p.key));
 }
 function auditPermit(group,audit,now) {
   return group.length>0&&audit?.ok===true&&Array.isArray(audit.members)&&now>=audit.time&&now-audit.time<=660&&group.every(x=>
@@ -401,4 +410,4 @@ function loadState(file='/vertex/data/governance/state.json') {
   return cachedState;
 }
 module.exports={GiB,TiB,SPACE_FLOOR,MIN_SIZE,MAX_SIZE,known,noHr,RETIRE_TAG,partialRetirable,raw,cp,digest,host,managed,safePath,hrMet,structural,zeroStale,observe,delta,quiet,remaining,pressure,fresh,slowPause,decision,admission,loadState,noDemand,mtLowYield,groupLowYield,hostsFor,auditPermit,hhIdlePeers,YIELD_REVISION,legacyLowYield,liveGroupLow,noHrYieldCandidate,noHrYieldPermit,liveUploaded,EXIT_ONLY_REVISION,promotionSafetyPause};
-Object.assign(module.exports,{exactMode,exactEngine,groupKey,groupEntries,reclaimConfig});
+Object.assign(module.exports,{exactMode,exactEngine,groupKey,groupEntries,reclaimConfig,refreshCandidate});

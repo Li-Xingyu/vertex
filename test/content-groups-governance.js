@@ -4,6 +4,7 @@ const assert = require('assert').strict; const path = require('path'); const Mod
 const fs = require('fs'); const vm = require('vm');
 const native = path.join(__dirname, '../app/libs/content-groups');
 const I = require(path.join(native, 'identity')); const E = require(path.join(native, 'reclaim'));
+const Q = require(path.join(native, 'incremental')); const G = require(path.join(native, 'index'));
 const realLoad = Module._load; const realGet = http.get;
 let records = []; let logs = []; let calls = []; let rows = []; let state; let manifests = {}; let afterDelete; let infoHook; let trackerHook; let filesHook; let deleteNoOp = false;
 Module._load = function (name, ...args) {
@@ -24,12 +25,12 @@ function enc (x) {
   return Buffer.concat([Buffer.from('d'), ...Object.keys(x).sort().flatMap(k => [enc(k), enc(x[k])]), Buffer.from('e')]);
 }
 function task (salt, options = {}) {
-  const file = options.file || 'a.bin'; const size = 4;
-  const data = enc({ info: { name: 'content', files: [{ length: size, path: [file] }], 'piece length': 16, pieces: Buffer.alloc(20, options.piece || 1), private: salt } });
+  const file = options.file || 'a.bin'; const size = 4; const content = options.content || 'content';
+  const data = enc({ info: { name: content, files: [{ length: size, path: [file] }], 'piece length': 16, pieces: Buffer.alloc(20, options.piece || 1), private: salt } });
   const row = {
     hash: I.metadata(data).hash,
-    name: 'content',
-    content_path: '/downloads/content',
+    name: content,
+    content_path: '/downloads/' + content,
     save_path: '/downloads',
     size,
     total_size: size,
@@ -49,7 +50,7 @@ function task (salt, options = {}) {
     dlspeed: 0,
     amount_left: 0
   };
-  const files = [{ index: 0, name: 'content/' + file, size, priority: 1 }];
+  const files = [{ index: 0, name: content + '/' + file, size, priority: 1 }];
   return { row, files, proof: I.identity(data, row, files, clientId), checkedAt: now };
 }
 function snapshot (items, at = now) { return { schema: 1, clientId, at, cache: Object.fromEntries(items.map(i => [i.row.hash, clone(i)])) }; }
@@ -163,6 +164,160 @@ function nativeClient (base, torrents, clock) {
   });
 }
 async function run () {
+  await test('expired evidence can nominate refresh but never fit or authorize deletion', () => {
+    const items = [task(0), task(1)]; items.forEach(t => { t.checkedAt = now - 700; }); fixture(items);
+    assert(P.refreshCandidate(rows, rows[0], state, now)); assert(!eligible());
+    const hints = A.buildRefreshHints(state, {}, P.groupEntries(rows, state, now, true));
+    assert.equal(hints.groups.length, 1); assert.equal(hints.groups[0].members.length, 2);
+    assert.equal(state.exactGroups.groups[0].checkedAt, now - 700);
+  });
+  await test('refresh nomination retains HR yield references near-complete and missing history guards', () => {
+    for (const mutate of [
+      () => { rows[0].tracker = 'https://tracker.carpt.net/announce'; state.audits = {}; },
+      () => { rows[0].uploaded = 128 * 1024 ** 2; },
+      () => { rows[0].upspeed = 200000; },
+      () => { rows[0].progress = 0.95; rows[0].state = 'downloading'; },
+      () => { rows.push({ ...rows[0], hash: 'f'.repeat(40) }); },
+      () => { rows[0].added_on++; },
+      () => { state.history = {}; },
+      () => { state.otherRootProtected = false; },
+      () => { state.time -= 661; }
+    ]) {
+      const items = [task(0), task(1)]; items.forEach(t => { t.checkedAt = now - 700; }); fixture(items); mutate();
+      assert(!P.refreshCandidate(rows, rows[0], state, now)); assert(!eligible());
+    }
+  });
+  await test('same 32-request task budget sustains natural fit across 1563-task backlog', async () => {
+    async function simulate (hintsEnabled) {
+      const start = now - 1200; const items = [task(0), task(1)]; items.forEach(t => { t.checkedAt = start - 400; }); const base = fixture(items);
+      const target = new Set(rows.map(r => r.hash)); const cache = snapshot(items, start).cache;
+      for (let n = 1; n <= 1561; n++) {
+        const r = { ...rows[0], hash: n.toString(16).padStart(40, '0'), content_path: '/downloads/other-' + n };
+        rows.push(r); cache[r.hash] = { row: clone(r), checkedAt: start - 900 };
+      }
+      const previous = { cache, report: G.buildIndex(items, clientId), incremental: Q.plan(rows, { cache }, [], start, 32) };
+      state.time = start;
+      state.exactGroups = E.prepare({ schema: 1, clientId, at: start, cache }, rows, clientId, start);
+      for (const h of Object.values(state.history)) {
+        h.last = start - 300; h.samples = [];
+        for (let time = start - 10800; time < start; time += 300) h.samples.push({ time, up: 0, down: 0, leechers: 0 });
+      }
+      for (const a of Object.values(state.audits)) a.time = start;
+      let hints = A.buildRefreshHints(state, {}, P.groupEntries(rows, state, start, true));
+      // Exercise the native rule on the complete target group; the planner and
+      // observer above still receive the entire 1563-task pool each cycle.
+      const clock = { seconds: start }; const live = await normalized(rows.filter(r => target.has(r.hash))); const c = nativeClient(base, live, clock); D.install(c);
+      let normalReads = 0; let maxAge = 0;
+      for (let time = start; time <= now; time += 30) {
+        const plan = Q.plan(rows, previous, [], time, 32, hintsEnabled ? hints : null, clientId);
+        assert(plan.selected.length <= 32);
+        for (const r of plan.selected) { previous.cache[r.hash].checkedAt = time; delete plan.pending[r.hash]; if (!target.has(r.hash)) normalReads++; }
+        previous.incremental = plan;
+        if ((time - start) % 300 === 0) {
+          const old = clone(state); state.time = time;
+          state.exactGroups = E.prepare({ schema: 1, clientId, at: time, cache: previous.cache }, rows, clientId, time);
+          state.history = P.observe(old.history, rows, time, state);
+          state.audits = {}; state.exitFence = {};
+          for (const g of state.exactGroups.groups) {
+            if (!P.groupLowYield(rows, rows.find(r => r.hash === g.members[0]), state, time)) continue;
+            state.audits[g.key] = {
+              ...old.audits[g.key],
+              ok: true,
+              time,
+              allocated: 4,
+              members: g.members,
+              trackers: Object.fromEntries(g.members.map(h => [h, ['hdfans.org']])),
+              groupKey: g.key,
+              groupRevision: g.revision
+            };
+            state.exitFence[g.key] = { last: time, status: 'pending', path: g.paths[0], members: g.members };
+          }
+          hints = A.buildRefreshHints(state, { ...old, refreshHints: hints }, P.groupEntries(rows, state, time, true).filter(g => P.refreshCandidate(rows, g.group[0], state, time)));
+        }
+        clock.seconds = time; c.flashFitTime(c.deleteRules[0]);
+        maxAge = Math.max(maxAge, ...items.map(t => time - previous.cache[t.row.hash].checkedAt));
+      }
+      const fit = c.fitTime[D.RID][items[0].row.hash];
+      if (hintsEnabled) {
+        assert(normalReads >= 8 * 41); assert(maxAge <= 180, JSON.stringify({ maxAge, hints, fit, age: items.map(t => now - previous.cache[t.row.hash].checkedAt) })); assert(now - fit > 600);
+        await c.autoDelete(); assert.equal(calls.length, 2); assert.deepEqual(calls.map(v => v.deleteFiles), [false, true]);
+      } else { assert.equal(fit, undefined); assert.equal(calls.length, 0); assert(maxAge > 660); }
+    }
+    await simulate(false); await simulate(true);
+  });
+  await test('priority hints reject stale wrong-client changed-members and binding mismatches', () => {
+    const items = [task(0), task(1)]; fixture(items);
+    const previous = { cache: snapshot(items).cache, report: G.buildIndex(items, clientId) };
+    const hint = A.buildRefreshHints(state, {}, P.groupEntries(rows, state, now));
+    for (const mutate of [h => { h.time -= 661; }, h => { h.time++; }, h => { h.clientId = 'other'; },
+      h => { h.groups[0].members.pop(); }, h => { h.groups[0].revision = 'bad'; },
+      h => { h.groups[0].bindings[rows[0].hash].addedOn++; }]) {
+      const bad = clone(hint); mutate(bad); assert.equal(Q.refreshGroups(bad, rows, previous, now, clientId).length, 0);
+    }
+    rows.push({ ...rows[0], hash: 'f'.repeat(40) }); assert.equal(Q.refreshGroups(hint, rows, previous, now, clientId).length, 0);
+  });
+  await test('failed member keeps backoff and oversized groups make bounded oldest-first progress', () => {
+    const items = Array.from({ length: 40 }, (_, i) => task(i)); items.forEach(t => { t.checkedAt = now - 400; }); fixture(items);
+    let previous = { cache: snapshot(items).cache, report: G.buildIndex(items, clientId) };
+    const hint = A.buildRefreshHints(state, {}, P.groupEntries(rows, state, now));
+    const a = Q.plan(rows, previous, [], now, 32, hint, clientId); assert.equal(a.selected.length, 32);
+    const failed = a.selected[0].hash; a.pending[failed].due = now + 300;
+    for (const r of a.selected.slice(1)) { previous.cache[r.hash].checkedAt = now; delete a.pending[r.hash]; }
+    previous = { ...previous, incremental: a };
+    const b = Q.plan(rows, previous, [], now + 30, 32, hint, clientId);
+    assert(!b.selected.some(r => r.hash === failed));
+    assert(rows.filter(r => !a.selected.includes(r)).every(r => b.selected.includes(r)));
+    assert.equal(b.selected.length, 8); // Do not reread the 31 recently successful siblings.
+  });
+  await test('one-item budget alternates priority with ordinary work and malformed hints only lose priority', () => {
+    const items = [task(0), task(1, { content: 'ordinary' })]; items.forEach(t => { t.checkedAt = now - 400; }); fixture(items);
+    const previous = { cache: snapshot(items).cache, report: G.buildIndex(items, clientId) };
+    const hint = A.buildRefreshHints(state, {}, P.groupEntries(rows, state, now)); hint.groups = hint.groups.slice(0, 1);
+    const a = Q.plan(rows, previous, [], now, 1, hint, clientId);
+    const b = Q.plan(rows, { ...previous, incremental: a }, [], now + 30, 1, hint, clientId);
+    assert.notEqual(a.selected[0].hash, b.selected[0].hash); assert.equal(a.selected.length, 1); assert.equal(b.selected.length, 1);
+    assert.equal(Q.refreshGroups({ ...hint, groups: [null, {}] }, rows, previous, now, clientId).length, 0);
+  });
+  await test('reclaim ordering uses audited allocation then alternate oldest, never nominal size or unsafe group', () => {
+    fixture([task(0), task(1, { content: 'other' }), task(2, { content: 'unsafe' })]);
+    const groups = state.exactGroups.groups;
+    state.audits[groups[0].key].allocated = 10; state.audits[groups[1].key].allocated = 100; state.audits[groups[2].key].allocated = 10000;
+    rows[0].size = 1000000; rows[2].upspeed = 200000;
+    state.refreshHints = { groups: groups.map((g, i) => ({ key: g.key, since: now - 500 + i * 100 })) };
+    assert.equal(D.orderCandidates(rows, state, now, 0)[0], rows[1]);
+    assert.equal(D.orderCandidates(rows, state, now, 1)[0], rows[0]);
+    assert.equal(D.orderCandidates(rows, state, now, 0)[2], rows[2]);
+  });
+  await test('audit exception details are classified without leaking raw messages', () => {
+    assert.equal(A.auditFailure(Error('identity_manifest_changed')), 'identity_manifest_changed');
+    assert.equal(A.auditFailure(Object.assign(Error('private path'), { code: 'ENOENT' })), 'ENOENT');
+    assert.equal(A.auditFailure(Error('https://secret.invalid/?passkey=synthetic')), 'unclassified');
+  });
+  await test('post-check distinguishes task removal from absent files without claiming net GiB', () => {
+    fixture(); const missing = () => { throw Object.assign(Error('missing'), { code: 'ENOENT' }); };
+    let checks = 0;
+    const absent = A.verifyRetired(state, [], now, { lstatSync: () => { checks++; return missing(); } });
+    assert.equal(absent.groupsAbsent, 1); assert.equal(absent.netReleasedBytes, null); assert(checks > 0);
+    const present = A.verifyRetired(state, [], now, { lstatSync: () => ({ isSymbolicLink: () => false, isDirectory: () => true }) });
+    assert.equal(present.groupsAbsent, 0); assert.equal(present.groupsStillPresent, 1);
+    const noTaskExit = A.verifyRetired(state, rows, now, { lstatSync: () => { throw Error('must not read'); } });
+    assert.equal(noTaskExit.checked, 0);
+    const symlink = A.verifyRetired(state, [], now, { lstatSync: () => ({ isSymbolicLink: () => true }) });
+    assert.equal(symlink.groupsAbsent, 0); assert.equal(symlink.checkErrors, 1);
+    const again = A.verifyRetired({ ...state, reclamationVerification: absent }, [], now + 300, { lstatSync: missing });
+    assert.equal(again.groupsAbsent, 1); assert.equal(again.checked, 0);
+  });
+  await test('post-check is bounded and still-present files cannot starve other retired groups', () => {
+    const pending = Object.fromEntries(Array.from({ length: 7 }, (_, i) => ['g' + i, { paths: ['/downloads/x' + i], files: [['/downloads/x' + i, 4]], since: now - 100 }]));
+    const present = { lstatSync: () => ({ isSymbolicLink: () => false, isDirectory: () => true }) };
+    const a = A.verifyRetired({ reclamationVerification: { pending } }, [], now, present);
+    assert.equal(a.checked, 4); assert.equal(a.groupsAbsent, 0);
+    const b = A.verifyRetired({ reclamationVerification: a }, [], now + 300, present);
+    assert.equal(b.checked, 4); assert(Object.values(b.pending).every(v => v.lastChecked > 0));
+    fixture(); const protectedRows = [{ ...rows[0], hash: 'f'.repeat(40) }]; let calls = 0;
+    const protectedResult = A.verifyRetired(state, protectedRows, now, { lstatSync: () => { calls++; } });
+    assert.equal(protectedResult.groupsAbsent, 0); assert.equal(calls, 0);
+  });
   await test('real qB adapter rows preserve exact grouping and preparation without input mutation', async () => {
     const items = [task(0), task(1)]; fixture(items); const live = await normalized(); const before = JSON.stringify(live);
     const exact = E.prepare(snapshot(items), live, clientId, now);

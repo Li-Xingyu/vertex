@@ -226,7 +226,7 @@ async function run() {
     const list=await json(base+'/api/v2/torrents/trackers?hash='+encodeURIComponent(t.hash),cookie);
     state.trackerHosts[t.hash]=[...new Set(list.filter(x=>/^https?:\/\/|^udp:\/\//.test(x.url)).map(x=>new URL(x.url).hostname.toLowerCase()))];
   }
-  const candidates=[];
+  const candidates=[],refreshCandidates=[];
   for(const {key,group} of P.groupEntries(rows,state,now,true)) {
     if(group.some(t=>Number(t.progress)>=.9&&Number(t.progress)<1)){
       const continued=old.ok===true&&now>old.time&&now-old.time<=660&&group.every(t=>old.history?.[key]?.members.includes(t.hash));
@@ -244,6 +244,7 @@ async function run() {
       if(group.some(t=>!P.known[P.host(t)]))state.summary.unknownHrGroups++;
       else if(group.some(t=>!P.hrMet(t)))state.summary.hrNotMetGroups++;
     }
+    if(allSite&&P.refreshCandidate(rows,group[0],state,now))refreshCandidates.push({key,group});
     if(allSite&&P.groupLowYield(rows,group[0],state,now)){
       candidates.push({key,group,partial:group.some(t=>Number(t.progress)<1),all:true});state.summary.allSiteCandidates++;
       if(group.length>1)state.summary.sharedExitGroups++;
@@ -288,7 +289,7 @@ async function run() {
         }
       }
       if(audit.ok){state.summary.auditedGroups++;if(fast)state.summary.mtFastAudited++;if(all)state.summary.allSiteAudited++;if(P.quiet(state.history[key],audit.allocated,state.pressure,now))state.summary.quietGroups++;}
-    }catch(_){state.audits[key]={ok:false,time:now,reason:'audit_failed'};}
+    }catch(e){state.audits[key]={ok:false,time:now,reason:'audit_failed',detail:auditFailure(e)};}
   }
   state.summary.peerRequests=peerBudget.requests;
   state.auditAttempt=Object.fromEntries(candidates.map(x=>[x.key,pending[x.key]||0]));
@@ -297,6 +298,8 @@ async function run() {
     Number(!!b.fast)-Number(!!a.fast) ||
     (P.delta(state.history[a.key],a.fast?1800:(state.pressure?6:12)*3600,now)/Math.max(1,state.audits[a.key].allocated))-(P.delta(state.history[b.key],b.fast?1800:(state.pressure?6:12)*3600,now)/Math.max(1,state.audits[b.key].allocated)) || state.audits[b.key].allocated-state.audits[a.key].allocated);
   state.activeGroup=ready[0]?.key || null;
+  state.refreshHints=buildRefreshHints(state,old,refreshCandidates);
+  state.reclamationVerification=verifyRetired(old,rows,now);
   state.summary.pauseCandidates=rows.filter(t=>P.slowPause(rows,t,state,now)).length;
   writeFence(state,candidates.filter(x=>x.all),old,rows);
   writeState(state);
@@ -314,6 +317,74 @@ function auditOrder(old,pending,state){
   const paused=x=>x.group.every(t=>['pausedDL','stoppedDL','pausedUP','stoppedUP'].includes(t.state));
   return (a,b)=>Number(!!old.audits?.[b.key]?.ok)-Number(!!old.audits?.[a.key]?.ok)||
     Number(paused(b))-Number(paused(a))||(pending[a.key]||0)-(pending[b.key]||0)||Number(!!b.fast)-Number(!!a.fast)||
-    (state.history[a.key]?.up||0)-(state.history[b.key]?.up||0)||Number(b.group[0].size)-Number(a.group[0].size);
+    auditedBytes(old,b.key)-auditedBytes(old,a.key)||a.key.localeCompare(b.key);
 }
-module.exports={request,physicalDisk,hostPath,referencesOther,fileAudit,run,buildFence,buildHrAdmission,peerInterestProof,collectPeerInterest,auditOrder};
+function auditedBytes(state,key){const a=state.audits?.[key];return a?.ok===true&&Number.isSafeInteger(a.allocated)&&a.allocated>=0?a.allocated:0;}
+function auditFailure(e){
+  // Never persist raw errors: they can contain authenticated URLs/file paths.
+  const allowed=new Set(['identity_manifest_changed','manifest_shape','qbit_http','timeout','response_size','destination',
+    'file_budget','symlink','unmanaged_file','file_type','ENOENT','EACCES','EIO']);
+  if(allowed.has(e?.message))return e.message;
+  if(allowed.has(e?.code))return e.code;
+  return 'unclassified';
+}
+function buildRefreshHints(state,old,candidates){
+  if(!P.exactMode(state))return null;
+  const previous=new Map((old.refreshHints?.groups||[]).map(g=>[g.key,g]));
+  const entries=new Map(state.exactGroups.groups.map(g=>[g.key,g]));
+  const ordered=[...candidates].sort(auditOrder(old,old.auditAttempt||{},state));
+  // The host auditor supports four simultaneous drains. Add at most four
+  // waiting groups; otherwise a cold pool becomes another full-sweep queue.
+  const renew=ordered.filter(g=>state.audits[g.key]?.ok===true).slice(0,4);
+  const waiting=ordered.filter(g=>state.audits[g.key]?.ok!==true).slice(0,4);
+  return {version:1,clientId:state.exactGroups.clientId,time:state.time,groups:[...renew,...waiting].map(({key})=>{
+    const g=entries.get(key),prior=previous.get(key);
+    return {key,revision:g.revision,members:g.members,bindings:g.bindings,
+      phase:state.audits[key]?.ok===true?'renew':'candidate',
+      since:prior?.revision===g.revision?prior.since:state.time};
+  })};
+}
+// Bounded post-check of previously audited groups disappearing between natural
+// audits. No recursive scan, no deletion, and no attribution of df changes to a
+// particular group. Partial batches/unaudited disappearances aren't covered.
+function verifyRetired(old,rows,now,io=fs,clock=Date.now){
+  const prior=old.reclamationVerification||{},pending={...(prior.pending||{})};
+  const counts={groupsAbsent:prior.groupsAbsent||0,groupsStillPresent:0,checkErrors:0,dropped:prior.dropped||0};
+  const hashes=new Set(rows.map(t=>t.hash)),paths=rows.map(P.cp),deadline=clock()+2000;
+  const recently=new Set((prior.recentKeys||[]));
+  for(const g of old.exactGroups?.groups||[]){
+    const a=old.audits?.[g.key];
+    if(a?.ok!==true||old.exitFence?.[g.key]?.status!=='pending'||g.members.some(h=>hashes.has(h))||recently.has(g.key))continue;
+    if(!pending[g.key])pending[g.key]={paths:g.paths,files:g.files,since:now};
+  }
+  const next={},recent=[];let checked=0;
+  for(const [key,v] of Object.entries(pending).sort((a,b)=>(a[1].lastChecked||0)-(b[1].lastChecked||0)||a[1].since-b[1].since)){
+    if(now-v.since>86400||Object.keys(next).length>=128){counts.dropped++;continue;}
+    next[key]=v;
+    if(checked>=4||clock()>=deadline)continue;
+    checked++;
+    next[key]={...v,lastChecked:now};
+    try{
+      if(!Array.isArray(v.paths)||!v.paths.length||!v.paths.every(P.safePath)||!Array.isArray(v.files)||!v.files.length||v.files.length>10000)throw Error('invalid_witness');
+      if(paths.some(p=>!P.safePath(p)||v.paths.some(x=>p===x||p.startsWith(x+'/')||x.startsWith(p+'/'))))continue;
+      let absent=true;
+      for(const [file] of v.files){
+        if(clock()>=deadline)throw Error('verification_budget');
+        if(!P.safePath(file)||!v.paths.some(p=>file===p||file.startsWith(p+'/')))throw Error('invalid_witness');
+        const target=ROOT+file.slice('/downloads'.length);
+        // Reject symlink parents before treating ENOENT as proof of absence.
+        let parent=path.dirname(target);
+        while(parent===ROOT||parent.startsWith(ROOT+'/')){
+          try{const st=io.lstatSync(parent);if(st.isSymbolicLink()||!st.isDirectory())throw Error('unsafe_parent');}
+          catch(e){if(e.code!=='ENOENT')throw e;}
+          if(parent===ROOT)break;parent=path.dirname(parent);
+        }
+        try{io.lstatSync(target);absent=false;break;}catch(e){if(e.code!=='ENOENT')throw e;}
+      }
+      if(absent){counts.groupsAbsent++;recent.push(key);delete next[key];}else counts.groupsStillPresent++;
+    }catch(_){counts.checkErrors++;}
+  }
+  return {...counts,time:now,checked,pending:next,recentKeys:[...(prior.recentKeys||[]),...recent].slice(-256),
+    coverage:'previously-audited-whole-group-disappearance',netReleasedBytes:null};
+}
+module.exports={request,physicalDisk,hostPath,referencesOther,fileAudit,run,buildFence,buildHrAdmission,peerInterestProof,collectPeerInterest,auditOrder,buildRefreshHints,auditFailure,verifyRetired};

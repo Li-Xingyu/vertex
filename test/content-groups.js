@@ -10,6 +10,7 @@ const I = require('../app/libs/content-groups/identity');
 const G = require('../app/libs/content-groups');
 const E = require('../app/libs/content-groups/reclaim');
 const R = require('../app/libs/content-groups/reader');
+const Q = require('../app/libs/content-groups/incremental');
 const { auditGroup } = require('../app/libs/content-groups/file-audit');
 const { ContentGroupShadow } = require('../app/libs/content-groups/service');
 let count = 0;
@@ -58,6 +59,25 @@ async function fakeCollect (fixtures, previous, config = {}, lineages = {}) {
 }
 
 async function main () {
+  await test('worker reads optional refresh nominations only from healthy matching governance state', async () => {
+    const folder = path.join(work, 'hint-data'); const stateFile = path.join(folder, 'content-groups/brush-shadow.json');
+    const dir = path.join(folder, 'governance'); fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'state.json'); const good = {
+      ok: true,
+      groupingMode: 'exact-v1',
+      otherRootProtected: true,
+      fenceReady: true,
+      time: 1000,
+      refreshHints: { version: 1, clientId: 'brush', time: 1000, groups: [] }
+    };
+    assert.equal(await Q.readRefreshHints(stateFile, 'brush'), null);
+    fs.writeFileSync(file, JSON.stringify(good)); assert.deepEqual(await Q.readRefreshHints(stateFile, 'brush'), good.refreshHints);
+    assert.equal(await Q.readRefreshHints(stateFile, 'other'), null);
+    for (const extra of [{ ok: false }, { fenceReady: false }, { otherRootProtected: false }, { groupingMode: 'legacy' }, { time: 1300 }]) {
+      fs.writeFileSync(file, JSON.stringify({ ...good, ...extra })); assert.equal(await Q.readRefreshHints(stateFile, 'brush'), null);
+    }
+    fs.writeFileSync(file, '{malformed'); assert.equal(await Q.readRefreshHints(stateFile, 'brush'), null);
+  });
   await test('reclaim adapter binds exact members and never imports a report permit', () => {
     const a = fixture(0); const b = fixture(1); const now = 1000;
     const cache = Object.fromEntries([a, b].map(t => [t.row.hash, { ...t, checkedAt: now }]));

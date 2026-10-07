@@ -471,7 +471,21 @@ class Client {
       const rule = { ..._rule };
       rule.deleteNum = rule.deleteNum || 1;
       let deletedNum = 0;
-      for (const torrent of torrents) {
+      let ordered = torrents;
+      if (this.groupDeleteOwnsHistory?.has(rule.id) && this.orderGroupDeleteCandidates) {
+        try {
+          ordered = this.orderGroupDeleteCandidates(torrents, rule);
+          // An optional ordering hook may reorder only: never substitute rows,
+          // drop protections, or add tasks outside this immutable snapshot.
+          const source = new Set(torrents);
+          if (!Array.isArray(ordered) || ordered.length !== torrents.length ||
+              new Set(ordered).size !== source.size || ordered.some(t => !source.has(t))) throw Error('Invalid group order');
+        } catch (_) {
+          logger.info('内容组排序不可用，本轮规则不执行');
+          continue;
+        }
+      }
+      for (const torrent of ordered) {
         if (rejectDeleteHash[torrent.hash]) {
           continue;
         }

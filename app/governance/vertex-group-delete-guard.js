@@ -28,6 +28,10 @@ function install(c,refresh=false){
   if(!c||c.id!=='3dfcd430'&&c._client?.id!=='3dfcd430')throw new Error('wrong_client');
   if(c.codexGroupGuardVersion===VERSION&&!refresh)return false;
   const original=c.codexGroupGuardOriginal||c.deleteTorrent;
+  c.orderGroupDeleteCandidates=function(rows,rule){
+    if(rule.id!==RID)return rows;
+    return orderCandidates(rows,P.loadState(),Date.now()/1000,Number(this.codexGroupGuardStats?.groupsDeleted||0));
+  };
   c.codexGroupGuardOriginal=original;
   c.deleteTorrent=async function(torrent,rule){
     if(rule.id!==RID)return original.call(this,torrent,rule);
@@ -112,4 +116,23 @@ function install(c,refresh=false){
   if(c.supportsConfirmedGroupHistory===true){c.groupDeleteOwnsHistory=c.groupDeleteOwnsHistory||new Set();c.groupDeleteOwnsHistory.add(RID);}
   c.codexGroupGuardVersion=VERSION;return true;
 }
-module.exports={install,get,RID,VERSION};
+function orderCandidates(rows,state,now,completedBatches=0){
+  if(!P.exactMode(state)||!P.fresh(state,now))return rows;
+  const ranked=new Map(),waiting=new Map((state.refreshHints?.groups||[]).map(g=>[g.key,g.since]));
+  for(const e of P.exactEngine().context(rows,state,now).groups){
+    if(!e.valid||!e.group.length||!P.decision(rows,e.group[0],state,now).allCleanup)continue;
+    const a=state.audits[e.key];
+    if(!Number.isSafeInteger(a?.allocated)||a.allocated<0)continue;
+    const since=waiting.get(e.key),age=Number.isFinite(since)&&since>0&&since<=now?since:now;
+    for(const t of e.group)ranked.set(t,{bytes:a.allocated,since:age});
+  }
+  // Alternate largest audited allocation with oldest waiting group after each
+  // successful batch. Size cannot override eligibility or the native fit gate.
+  const fair=completedBatches%2===1;
+  return [...rows].sort((a,b)=>{
+    const x=ranked.get(a),y=ranked.get(b);
+    if(!x||!y)return Number(!!y)-Number(!!x);
+    return (fair?x.since-y.since:y.bytes-x.bytes)||(fair?y.bytes-x.bytes:x.since-y.since);
+  });
+}
+module.exports={install,get,RID,VERSION,orderCandidates};

@@ -102,8 +102,12 @@ function context (rows, state, now) {
     let valid = bound && !g.reasons.length && fresh(g.checkedAt, now);
     // Separate groups sharing any delete scope protect each other; they do NOT
     // share yield/H&R/history. Unknown references are protective too.
-    if (I.outsideScope(g.paths, new Set(members), scopes)) valid = false;
-    const entry = { key: g.key, revision: g.revision, identity: g, group: group.filter(Boolean), bound, valid };
+    const outside = I.outsideScope(g.paths, new Set(members), scopes);
+    if (outside) valid = false;
+    // Nomination for a read-only refresh is NOT a deletion capability. Stale
+    // manifests may be rechecked, but every other structural protection stays.
+    const refreshable = bound && !outside && g.reasons.every(r => r === 'stale_manifest');
+    const entry = { key: g.key, revision: g.revision, identity: g, group: group.filter(Boolean), bound, valid, refreshable };
     result.groups.push(entry);
     for (const h of members) result.byHash.set(h, entry);
   }

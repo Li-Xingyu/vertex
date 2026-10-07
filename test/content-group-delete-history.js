@@ -39,6 +39,17 @@ async function main () {
   await fixture(true, false).autoDelete(); assert.equal(calls.length, 0);
   const c = fixture(true); c.deleteTorrent = async () => { calls.push('confirmed-update', 'confirmed-flow'); return true; };
   await c.autoDelete(); assert.deepEqual(calls, ['confirmed-update', 'confirmed-flow']);
-  process.stdout.write(JSON.stringify({ passed: 4, productionRequests: 0 }) + '\n');
+  const ordered = fixture(true); const first = ordered.maindata.torrents[0]; const second = { ...first, hash: 'second' };
+  ordered.maindata.torrents.push(second); ordered.orderGroupDeleteCandidates = rows => [...rows].reverse();
+  ordered.deleteTorrent = async row => { calls.push(row.hash); return true; };
+  await ordered.autoDelete(); assert.deepEqual(calls, ['second']);
+  for (const hook of [() => [], rows => [{ ...rows[0] }], () => { throw Error('fixture'); }]) {
+    const bad = fixture(true); bad.orderGroupDeleteCandidates = hook; await bad.autoDelete(); assert.equal(calls.length, 0);
+  }
+  const other = fixture(false); other.orderGroupDeleteCandidates = () => { throw Error('must not run'); };
+  await other.autoDelete(); assert.equal(calls.length, 3);
+  const rejected = fixture(true); rejected.rejectDeleteRules = [{ id: 'reject' }];
+  rejected.orderGroupDeleteCandidates = rows => rows; await rejected.autoDelete(); assert.equal(calls.length, 0);
+  process.stdout.write(JSON.stringify({ passed: 10, productionRequests: 0 }) + '\n');
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });
