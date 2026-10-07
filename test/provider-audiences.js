@@ -1,0 +1,27 @@
+'use strict';
+const assert = require('assert').strict;
+const { profiles, defaults } = require('../app/libs/provider-profiles');
+const { validate } = require('../app/libs/provider-schema');
+const { parse, eligibility } = require('../app/libs/provider-parser');
+const now = Date.parse('2026-10-07T00:00:00Z') / 1000;
+const cfg = defaults('AUDIENCES', '1234abcd');
+const banner = (end = '2026-10-08 23:59:59', prefix = '官组FREE', start = '2026-10-04 00:00:00') => `<div><b>全局优惠生效：${prefix}</b>优惠开始：${start} (GMT+08:00)优惠截止：${end} (GMT+08:00)</div>`;
+const row = (marker = 'pro_free', group = '官方', hr = '') => `<tr><td class="torrents-box"><div class="torrents-name"><table><tr><td class="torrent-title-cell"><a href="details.php?id=12">Fixture</a><img class="${marker}">${hr}<span class="tags tgf">${group}</span><a href="download.php?id=12">dl</a></td></tr></table></div></td><td class="torrent-time-cell"><span title="2026-10-06 23:00:00"></span></td><td class="torrent-size-cell">10 GiB</td><td class="torrent-seeders-cell">2</td><td class="torrent-leechers-cell">7</td><td class="torrent-progress-cell"></td></tr>`;
+const html = (r = row(), b = banner()) => '<!doctype html><html><body><a href="userdetails.php?id=1">account</a>' + b + '<table class="torrents"><tbody>' + r + '</tbody></table></body></html>';
+const read = (r, b, c = cfg) => parse(html(r, b), c, profiles.AUDIENCES, now).candidates[0];
+let passed = 0;
+function test (name, f) { f(); passed++; console.log('PASS ' + name); }
+test('Audiences default is free-only and excludes HR', () => { validate(cfg, profiles); assert(cfg.selection.freeOnly); assert.equal(cfg.selection.hrPolicy, 'exclude'); });
+test('authenticated official FREE uses campaign end, not permanent exemption', () => { const c = read(); assert.equal(c.downloadUntil, Date.parse('2026-10-08T23:59:59+08:00') / 1000); assert.equal(c.downloadUnlimited, false); assert.equal(c.hrState, 'exempt'); assert.deepEqual(eligibility(c, cfg, now), []); });
+test('half price pinned row cannot inherit FREE', () => { const c = read(row('pro_50pctdown')); assert.equal(c.downloadFactor, 0.5); assert.equal(c.downloadUntil, null); assert(eligibility(c, cfg, now).includes('not-confirmed-free')); });
+test('unrelated group cannot borrow official deadline', () => { assert.equal(read(row('pro_free', '普通')).downloadUntil, null); });
+test('required HR is never changed by campaign', () => { const c = read(row('pro_free', '官方', '<img class="hitandrun">')); assert.equal(c.hrState, 'required'); assert(eligibility(c, cfg, now).includes('hr-not-exempt')); });
+test('expired, future and unknown campaigns do not prove a deadline', () => { for (const b of [banner('2026-10-06 00:00:00'), banner(undefined, undefined, '2026-10-08 00:00:00'), banner(undefined, '别的FREE'), '']) assert.equal(read(row(), b).downloadUntil, null); });
+test('conflicting deadlines fail closed', () => { assert.equal(read(row(), banner() + banner('2026-10-09 23:59:59')).downloadUntil, null); });
+test('duplicate identical notice does not conflict', () => { assert.equal(read(row(), banner() + banner()).downloadUntil, read().downloadUntil); });
+test('malformed or missing time does not imply unlimited', () => { assert.equal(read(row(), banner('unknown')).downloadUntil, null); });
+test('truncated page cannot use absence or page notice', () => { const c = parse(html().replace('</body></html>', ''), cfg, profiles.AUDIENCES, now).candidates[0]; assert.equal(c.hrState, 'unknown'); assert.equal(c.downloadUntil, null); });
+test('old configuration remains byte compatible', () => { const c = defaults('CARPT', '1234abcd'); assert(!('pageFreeRules' in c)); assert.equal(JSON.stringify(validate(c, profiles)), JSON.stringify(c)); });
+test('page rules cannot carry secrets code or URLs', () => { for (const key of ['cookie', 'url', 'code']) { const c = JSON.parse(JSON.stringify(cfg)); c.pageFreeRules[0][key] = 'fixture'; assert.throws(() => validate(c, profiles)); } });
+test('page rule labels must be distinct and selectors bounded', () => { const c = JSON.parse(JSON.stringify(cfg)); c.pageFreeRules[0].endLabel = c.pageFreeRules[0].startLabel; assert.throws(() => validate(c, profiles)); });
+console.log(JSON.stringify({ passed, productionRequests: 0 }));

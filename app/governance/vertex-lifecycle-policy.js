@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const GiB = 1024 ** 3, TiB = 1024 * GiB;
 const SPACE_FLOOR = 500 * GiB;
 const MIN_SIZE = 2 * GiB, MAX_SIZE = 600 * GiB;
-const categories = new Set(['CARPT','ZMPT','HDKYLIN','BTSCHOOL','HDFANS','NANYANG','HAIDAN','KUFEI','MTEAM','HHCLUB']);
+const categories = new Set(['CARPT','ZMPT','HDKYLIN','BTSCHOOL','HDFANS','NANYANG','HAIDAN','KUFEI','MTEAM','HHCLUB','AUDIENCES']);
 const known = {
   'tracker.carpt.net':[86400,10], 'carpt.net':[86400,10],
   'tracker.hdkyl.in':[172800,2], 'www.hdkylin.top':[172800,2],
@@ -23,7 +23,11 @@ const known = {
   // Operator explicitly confirmed no MT H&R; this is the live verified host.
   'tracker.m-team.cc':[0,0],
   // HH marked torrents: 72h in 20 days; ratio cannot substitute seeding time.
-  'tracker.hhanclub.net':[259200,Infinity]
+  'tracker.hhanclub.net':[259200,Infinity],
+  // Audiences user-supplied marked HR: 48h OR ratio1 within14d. Both hosts
+  // verified in an authenticated site .torrent on 2026-10-07. Unknown/tagged
+  // reseeds retain this conservative floor; source proof never transfers.
+  't.audiences.me':[172800,1], 'tracker.cinefiles.info':[172800,1]
 };
 const raw = t => t.originProp || t;
 const cp = t => String(raw(t).content_path || '');
@@ -63,7 +67,7 @@ function hhProof(t){
   const p=hhCache?.[t.hash];return p&&p.hr===false&&p.rssId==='57d6ce6e'&&
     p.size===Number(t.size)&&p.addedOn===number(t,'addedTime','added_on')&&p.time>0&&p.time<=Date.now()/1000?p:null;
 }
-function hostNoHr(t,h){return known[h]?.[0]===0&&known[h]?.[1]===0||h==='tracker.hhanclub.net'&&!!hhProof(t);}
+function hostNoHr(t,h){if(['t.audiences.me','tracker.cinefiles.info'].includes(h)){try{return require('./audiences-provider-lifecycle').noHr(t);}catch(_){return false;}}return known[h]?.[0]===0&&known[h]?.[1]===0||h==='tracker.hhanclub.net'&&!!hhProof(t);}
 const noHr = t => hostNoHr(t,host(t));
 const RETIRE_TAG='Vertex低收益退出';
 // Same pure module ships in the Vertex image and beside the existing host
@@ -328,14 +332,14 @@ function mtLowYield(rows,t,state,now=Date.now()/1000) {
 }
 const EXIT_ONLY_REVISION=1;
 function promotionSafetyPause(rows,t,state,now=Date.now()/1000,proof) {
-  if(t.category!=='HHCLUB')return false;
+  if(!['HHCLUB','AUDIENCES'].includes(t.category))return false;
   // The optional proof is for isolated fixtures. Native rules use hhProof's
   // exact hash/size/added-on/no-HR witness, not a category-based exemption.
-  let hh=proof===undefined?hhProof(t):proof;
+  let hh=proof===undefined?(t.category==='HHCLUB'?hhProof(t):null):proof;
   // A prepared native HH submission has a durable expiry witness even while
   // successful-history reconciliation is pending. It never grants HR exemption.
-  if(proof===undefined){try{const e=require('./hhan-provider-lifecycle').expiry(t);if(e&&(!hh||e.until<hh.until))hh=e;}catch(_){}}
-  if(fresh(state,now)&&t.category==='HHCLUB'&&Number(t.progress)<1&&['downloading','stalledDL'].includes(t.state)&&
+  if(proof===undefined){try{const e=require(t.category==='AUDIENCES'?'./audiences-provider-lifecycle':'./hhan-provider-lifecycle').expiry(t);if(e&&(!hh||e.until<hh.until))hh=e;}catch(_){}}
+  if(fresh(state,now)&&Number(t.progress)<1&&['downloading','stalledDL'].includes(t.state)&&
     // Native pause rule has a 1800s continuous fit gate: begin an hour early
     // so the intended actual stop remains about 30 minutes before promotion.
     // Promotion expiry is NOT reclamation. Preserve its existing physical-scope

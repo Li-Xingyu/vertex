@@ -744,6 +744,38 @@
     },
     "liveVerified": false
   },
+  "AUDIENCES": {
+    "label": "观众 / AUDIENCES",
+    "adapter": "html-table",
+    "origin": "https://audiences.me",
+    "listPath": "/torrents.php",
+    "detailPaths": ["/details.php"],
+    "downloadPaths": ["/download.php"],
+    "queryKeys": ["incldead", "cat", "spstate", "sort", "type", "inclbookmarked"],
+    "params": {"incldead": 1, "spstate": 2},
+    "budgetCaps": {"listPerHour": 36, "detailPerHour": 70},
+    "hrAbsence": {"rowSelectors": [".torrents-name", ".torrent-size-cell", ".torrent-progress-cell"]},
+    "hrRules": [
+      {"selector": ".hitandrun, .hit_and_run, .promotion-tag-hr, img[alt*=\"H&R\" i], img[title*=\"H&R\" i], img[src*=\"hit_run\" i], img[src*=\"h&r\" i], img[src*=\"h%26r\" i]", "state": "required"}
+    ],
+    "pageFreeRules": [{"selector":"div", "textPrefix":"全局优惠生效：官组FREE", "rowSelector":".tags.tgf", "rowText":"官方", "startLabel":"优惠开始：", "endLabel":"优惠截止："}],
+    "mapping": {
+      "rows": "table.torrents > tbody > tr",
+      "authenticated": "a[href*=\"userdetails.php\"]",
+      "timezoneOffset": 480,
+      "fields": {
+        "id": {"selector":".torrent-title-cell a[href*=\"details.php\"]", "attribute":"href", "query":"id"},
+        "title": {"selector":".torrent-title-cell a[href*=\"details.php\"]"},
+        "detail": {"selector":".torrent-title-cell a[href*=\"details.php\"]", "attribute":"href"},
+        "download": {"selector":"a[href*=\"download.php\"]", "attribute":"href"},
+        "size": {"selector":".torrent-size-cell"},
+        "seeders": {"selector":".torrent-seeders-cell"},
+        "leechers": {"selector":".torrent-leechers-cell"},
+        "publishedAt": {"selector":".torrent-time-cell span[title]", "attribute":"title", "format":"date"}
+      }
+    },
+    "liveVerified": false
+  },
   "MTEAM": {
     "label": "MTEAM",
     "adapter": "mteam-api",

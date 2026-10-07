@@ -152,6 +152,7 @@ function checkCss (c) {
   const { JSDOM } = require('jsdom'); const dom = new JSDOM('<table><tr><td></td></tr></table>');
   try {
     const selectors = [c.mapping.rows, c.mapping.authenticated, ...Object.values(c.mapping.fields).flatMap(f => [f.selector, f.header]), ...c.promotionRules.map(r => r.selector), ...c.hrRules.map(r => r.selector), ...(c.personalStateRules || []).map(r => r.selector), ...(c.hrAbsence ? c.hrAbsence.rowSelectors : [])];
+    selectors.push(...(c.pageFreeRules || []).flatMap(r => [r.selector, r.rowSelector]));
     for (const selector of selectors.filter(Boolean)) dom.window.document.querySelector(selector);
   } catch (_) { fail('PROVIDER_SELECTOR_INVALID'); } finally { dom.window.close(); }
 }

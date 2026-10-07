@@ -22,7 +22,7 @@ function mapping (m) {
 }
 function validate (c, profiles) {
   if (JSON.stringify(c).length > 32768) fail('PROVIDER_CONFIG_TOO_LARGE');
-  keys(c, ['version', 'profile', 'rssId', 'credentialRef', 'intervalSeconds', 'pages', 'pageSize', 'params', 'mapping', 'promotionRules', 'hrRules', 'hrAbsence', 'personalStateRules', 'selection', 'budgets', 'listTimeouts'], 'CONFIG');
+  keys(c, ['version', 'profile', 'rssId', 'credentialRef', 'intervalSeconds', 'pages', 'pageSize', 'params', 'mapping', 'promotionRules', 'pageFreeRules', 'hrRules', 'hrAbsence', 'personalStateRules', 'selection', 'budgets', 'listTimeouts'], 'CONFIG');
   const p = profiles[c.profile];
   if (c.version !== 1 || !p || !/^[a-f0-9]{8}$/.test(c.rssId || '')) fail('PROVIDER_ID');
   if (!/^(site:[A-Za-z0-9_-]{1,48}|rss:[a-f0-9]{8}|driver)$/.test(c.credentialRef || '')) fail('PROVIDER_CREDENTIAL_REF');
@@ -55,6 +55,14 @@ function validate (c, profiles) {
     keys(r, ['selector', 'path', 'equals', 'state', 'text'], 'HR'); marker(r);
     if (r.text !== undefined && (!r.selector || !str(r.text, 80) || !r.text.trim())) fail('PROVIDER_HR_TEXT');
     if (!['required', 'exempt'].includes(r.state)) fail('PROVIDER_HR_STATE');
+  }
+  if (c.pageFreeRules !== undefined) {
+    if (p.adapter === 'mteam-api' || !Array.isArray(c.pageFreeRules) || c.pageFreeRules.length > 6) fail('PROVIDER_PAGE_FREE');
+    for (const r of c.pageFreeRules) {
+      const fields = ['selector', 'textPrefix', 'rowSelector', 'rowText', 'startLabel', 'endLabel'];
+      keys(r, fields, 'PAGE_FREE');
+      if (fields.some(k => !str(r[k], k.endsWith('elector') ? 256 : 80) || !r[k].trim()) || r.startLabel === r.endLabel) fail('PROVIDER_PAGE_FREE');
+    }
   }
   if (c.personalStateRules !== undefined) {
     if (!Array.isArray(c.personalStateRules) || c.personalStateRules.length > 12) fail('PROVIDER_PERSONAL_RULES');

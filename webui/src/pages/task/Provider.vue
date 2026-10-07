@@ -91,6 +91,17 @@
                   </div>
                 </div>
                 <a-button size="small" :disabled="busy || config.promotionRules.length >= 40" @click="addPromotion">新增促销标记</a-button>
+                <template v-if="!jsonMode">
+                  <h3 class="provider-subtitle">页面活动免费期限</h3>
+                  <p class="provider-secondary">仅补充期限：活动公告、行内成员标签和行内免费标记必须同时匹配。缺失、冲突、未开始或已结束均不放行；不推断永久免费，不改变 H&amp;R。</p>
+                  <div v-for="(r, i) in (config.pageFreeRules || [])" :key="'page-free-' + i" class="provider-marker">
+                    <div class="provider-marker-heading"><span>活动 {{ i + 1 }}</span><a-button type="link" danger size="small" :aria-label="'移除页面活动 ' + (i + 1)" :disabled="busy" @click="config.pageFreeRules.splice(i, 1)">移除</a-button></div>
+                    <div class="provider-marker-fields">
+                      <div v-for="(label, key) in pageFreeFields" :key="key" class="provider-marker-selector"><label :for="'page-free-' + i + '-' + key">{{ label }}</label><a-input :id="'page-free-' + i + '-' + key" size="small" v-model:value="r[key]" :disabled="busy" /></div>
+                    </div>
+                  </div>
+                  <a-button size="small" :disabled="busy || (config.pageFreeRules || []).length >= 6" @click="addPageFree">新增页面活动</a-button>
+                </template>
                 <h3 class="provider-subtitle">H&R 明确信号</h3><p class="provider-secondary">仅识别入场要求，不作为已完成保种的证明。默认没有匹配标记时保留“未知”。</p>
                 <p v-if="!config.hrRules.length" class="provider-secondary">尚未配置明确信号。</p>
                 <div v-for="(r, i) in config.hrRules" :key="i" class="provider-marker">
@@ -210,6 +221,7 @@ export default {
       },
       selectionLabels: { minGiB: '最小体积（GiB）', maxGiB: '最大体积（GiB）', minSeeders: '最少做种人数', minLeechers: '最少下载人数', maxAgeHours: '最大种龄（小时）', minFreeSeconds: '免费剩余时间（秒）' },
       fieldLabels: { id: '种子 ID', title: '标题', size: '体积', seeders: '做种人数', leechers: '下载人数', publishedAt: '发布时间', detail: '详情链接', download: '下载链接', downloadUntil: '下载优惠截止', uploadUntil: '上传优惠截止', downloadUnlimited: '长期下载优惠', uploadUnlimited: '长期上传优惠' },
+      pageFreeFields: { selector: '公告 CSS 选择器', textPrefix: '公告文字前缀', rowSelector: '行内成员 CSS 选择器', rowText: '成员标签文字', startLabel: '开始时间前标签', endLabel: '结束时间前标签' },
       attributeOptions: ['', 'href', 'title', 'datetime', 'data-timestamp', 'value'].map(value => ({ value, label: value || '文本' }))
     };
   },
@@ -271,6 +283,7 @@ export default {
       return rules;
     },
     enumText (v) { return typeof v === 'string' ? v : JSON.stringify(v); },
+    addPageFree () { if (!this.config.pageFreeRules) this.config.pageFreeRules = []; this.config.pageFreeRules.push({ selector: '', textPrefix: '', rowSelector: '', rowText: '', startLabel: '', endLabel: '' }); },
     setEnum (rule, text) { rule.equals = typeof rule.equals === 'boolean' && /^(true|false)$/.test(text) ? text === 'true' : typeof rule.equals === 'number' && text.trim() !== '' && Number.isFinite(Number(text)) ? Number(text) : text; },
     parameter (key, value) { if (value === '') delete this.config.params[key]; else this.config.params[key] = value; },
     async run (action, fn) {
@@ -279,7 +292,7 @@ export default {
       try { await fn(); } catch (e) {
         if (e.errorFields?.length) {
           const field = e.errorFields[0].name;
-          this.tab = ['mapping', 'promotionRules', 'hrRules', 'hrAbsence', 'personalStateRules'].includes(field[0]) ? 'mapping' : field[0] === 'selection' ? 'selection' : 'source';
+          this.tab = ['mapping', 'promotionRules', 'pageFreeRules', 'hrRules', 'hrAbsence', 'personalStateRules'].includes(field[0]) ? 'mapping' : field[0] === 'selection' ? 'selection' : 'source';
           await this.$nextTick(); this.$refs.configForm?.scrollToField(field, { block: 'center' }); this.error = '请先修正表单中标出的字段。';
         } else if (action === 'refresh') this.listError = this.explain(e.message);
         else this.error = this.explain(e.message);

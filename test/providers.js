@@ -414,7 +414,7 @@ async function runtimeTests () {
       assert.equal((await service.store.read(c.rssId)).revision, 0); assert.equal(result.candidates[0].hrState, 'unknown');
     } finally { unregister(); transportHook = null; }
   });
-  await test('all ten independent profiles including MT can acquire concurrently', async () => {
+  await test('all independent profiles including MT can acquire concurrently', async () => {
     clockOffset += 3600000;
     let release; let entered = 0;
     const gate = new Promise(resolve => { release = resolve; });
@@ -434,7 +434,7 @@ async function runtimeTests () {
     const settled = Promise.allSettled(configs.map(c => service.fetchList(c)));
     try {
       for (let i = 0; i < 300 && entered < configs.length; i++) await new Promise(resolve => setTimeout(resolve, 10));
-      assert.equal(entered, 10); assert.equal(requests - before, 9);
+      assert.equal(entered, configs.length); assert.equal(requests - before, configs.filter(c => profiles[c.profile].adapter !== 'mteam-api').length);
       release();
       const outcomes = await settled;
       assert(outcomes.every(x => x.status === 'rejected' && x.reason.code === 'PROVIDER_TIMEOUT_BODY'));

@@ -24,10 +24,11 @@ function defaults (profile, rssId) {
     params: clone(p.params),
     mapping,
     promotionRules: clone(p.promotionRules || profiles.NEXUS_TEMPLATE.promotionRules),
+    ...(p.pageFreeRules ? { pageFreeRules: clone(p.pageFreeRules) } : {}),
     hrRules: clone(p.hrRules || profiles.NEXUS_TEMPLATE.hrRules),
     personalStateRules: clone(personalRules[profile] || []),
     ...(p.hrAbsence ? { hrAbsence: clone(p.hrAbsence) } : {}),
-    selection: { freeOnly: ['MTEAM', 'HHCLUB'].includes(profile), hrPolicy: profile === 'HHCLUB' ? 'exclude' : 'protect', minGiB: 0, maxGiB: 600, minSeeders: 1, minLeechers: 1, maxAgeHours: 168, minFreeSeconds: 7200, sort: 'publishedAt', preferUploadFactor: true },
+    selection: { freeOnly: ['MTEAM', 'HHCLUB', 'AUDIENCES'].includes(profile), hrPolicy: ['HHCLUB', 'AUDIENCES'].includes(profile) ? 'exclude' : 'protect', minGiB: 0, maxGiB: 600, minSeeders: 1, minLeechers: 1, maxAgeHours: 168, minFreeSeconds: 7200, sort: 'publishedAt', preferUploadFactor: true },
     budgets: { listPerHour: 12, detailPerHour: 12, ...(p.adapter === 'mteam-api' ? { personalPerHour: 12 } : {}) }
   };
 }

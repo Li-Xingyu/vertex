@@ -34,6 +34,8 @@ jobs:
         run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/provider-metadata-gate.js
       - name: Personal list-state parsing regressions
         run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/provider-personal.js
+      - name: Audiences scoped campaign and H&R regressions
+        run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/provider-audiences.js
       - name: Content identity and read-only worker regressions
         run: docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,size=128m --entrypoint node "$IMAGE:$TAG" test/content-groups.js
       - name: Read-only lineage stream and incremental regressions

@@ -2,6 +2,7 @@
 const { JSDOM } = require('jsdom');
 const { fail } = require('./provider-schema');
 const personal = require('./provider-personal');
+const pageFree = require('./provider-page-free');
 function valueAt (obj, path) {
   return (path || '').split('.').reduce((x, k) => x && Object.prototype.hasOwnProperty.call(x, k) ? x[k] : undefined, obj);
 }
@@ -76,13 +77,14 @@ function parse (body, config, profile, now = Date.now() / 1000) {
       if (!Array.isArray(rows)) fail('PROVIDER_RESPONSE_SHAPE');
     } else {
       if (typeof body !== 'string' || Buffer.byteLength(body) > 8 * 1024 ** 2) fail('PROVIDER_BODY_LIMIT');
-      dom = new JSDOM(body, { includeNodeLocations: !!config.hrAbsence }); // No scripts, resources or browser execution.
+      dom = new JSDOM(body, { includeNodeLocations: !!config.hrAbsence || !!config.pageFreeRules?.length }); // No scripts, resources or browser execution.
       const d = dom.window.document;
       if (d.querySelector('input[type="password"]') || /cf-chl-|checking your browser|verify you are human/i.test(body)) fail('PROVIDER_AUTH');
       if (!config.mapping.authenticated || !d.querySelector(config.mapping.authenticated)) fail('PROVIDER_AUTH');
       rows = [...d.querySelectorAll(config.mapping.rows)];
       if (rows.length > 3000) fail('PROVIDER_ROW_LIMIT');
     }
+    const pageEvidence = json ? [] : pageFree.evidence(dom, config.pageFreeRules, now, epoch, config.mapping.timezoneOffset);
     const candidates = new Map(); let invalid = 0; let conflicts = 0;
     for (const root of rows.slice(0, 3000)) {
       const raw = {};
@@ -128,6 +130,7 @@ function parse (body, config, profile, now = Date.now() / 1000) {
           c.hrState = 'exempt'; c.hrEvidence = 'site-rule-unmarked';
         }
       }
+      if (!json) pageFree.apply(root, c, pageEvidence);
       const old = candidates.get(c.candidateKey);
       if (old) {
         personal.merge(old, c);
