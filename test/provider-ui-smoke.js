@@ -29,7 +29,7 @@ async function main () {
   phase = 'protected-api';
   const unauth = await request('GET', '/api/provider/list'); assert(!JSON.parse(unauth.text).success);
   const data = JSON.parse((await request('GET', '/api/provider/list', null, cookie)).text).data;
-  assert.equal(data.profiles.length, 10); assert.equal(data.records.length, 0);
+  assert.equal(data.profiles.length, Object.keys(require('../app/libs/provider-profiles').profiles).length); assert.equal(data.records.length, 0);
   const cfg = JSON.parse((await request('GET', '/api/provider/defaults?profile=NANYANG&rssId=1234abcd', null, cookie)).text).data;
   assert(!Object.hasOwnProperty.call(cfg.budgets, 'metadataPerHour'));
   assert(data.profiles.every(p => !Object.hasOwnProperty.call(p.budgetCaps, 'metadataPerHour')));

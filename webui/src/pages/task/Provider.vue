@@ -93,7 +93,7 @@
                 <a-button size="small" :disabled="busy || config.promotionRules.length >= 40" @click="addPromotion">新增促销标记</a-button>
                 <template v-if="!jsonMode">
                   <h3 class="provider-subtitle">页面活动免费期限</h3>
-                  <p class="provider-secondary">仅补充期限：活动公告、行内成员标签和行内免费标记必须同时匹配。缺失、冲突、未开始或已结束均不放行；不推断永久免费，不改变 H&amp;R。</p>
+                  <p class="provider-secondary">单种免费期限优先。仅在没有单种时间标记时，按活动公告、成员标签及免费标记补充期限；不覆盖已有期限，不推断永久免费，不改变 H&amp;R。</p>
                   <div v-for="(r, i) in (config.pageFreeRules || [])" :key="'page-free-' + i" class="provider-marker">
                     <div class="provider-marker-heading"><span>活动 {{ i + 1 }}</span><a-button type="link" danger size="small" :aria-label="'移除页面活动 ' + (i + 1)" :disabled="busy" @click="config.pageFreeRules.splice(i, 1)">移除</a-button></div>
                     <div class="provider-marker-fields">

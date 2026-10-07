@@ -771,7 +771,8 @@
         "size": {"selector":".torrent-size-cell"},
         "seeders": {"selector":".torrent-seeders-cell"},
         "leechers": {"selector":".torrent-leechers-cell"},
-        "publishedAt": {"selector":".torrent-time-cell span[title]", "attribute":"title", "format":"date"}
+        "publishedAt": {"selector":".torrent-time-cell span[title]", "attribute":"title", "format":"date"},
+        "downloadUntil": {"selector":".torrent-title-cell span[title]", "attribute":"title", "format":"date"}
       }
     },
     "liveVerified": false

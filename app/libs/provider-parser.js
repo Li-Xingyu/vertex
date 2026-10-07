@@ -130,7 +130,7 @@ function parse (body, config, profile, now = Date.now() / 1000) {
           c.hrState = 'exempt'; c.hrEvidence = 'site-rule-unmarked';
         }
       }
-      if (!json) pageFree.apply(root, c, pageEvidence);
+      if (!json) pageFree.apply(root, c, pageEvidence, !!config.mapping.fields.downloadUntil?.selector && !!root.querySelector(config.mapping.fields.downloadUntil.selector));
       const old = candidates.get(c.candidateKey);
       if (old) {
         personal.merge(old, c);

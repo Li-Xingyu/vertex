@@ -26,10 +26,12 @@ function evidence (dom, rules, now, epoch, offset) {
     return { rule, end: distinct.length === 1 ? Number(distinct[0].split(':')[1]) : null };
   });
 }
-function apply (root, candidate, records) {
-  if (candidate.downloadFactor !== 0 || candidate.conflict) return;
+function apply (root, candidate, records, ownDeadlinePresent = false) {
+  // Single-torrent promotion is independent of the temporary campaign. Its
+  // own deadline wins; an ambiguous/malformed own timer cannot be overwritten.
+  if (candidate.downloadFactor !== 0 || candidate.conflict || Number.isFinite(candidate.downloadUntil) || candidate.downloadUnlimited === true || ownDeadlinePresent) return;
   const ends = records.filter(({ rule, end }) => Number.isFinite(end) &&
     [...root.querySelectorAll(rule.rowSelector)].some(e => norm(e.textContent) === norm(rule.rowText))).map(x => x.end);
-  if (ends.length) candidate.downloadUntil = Math.min(...ends, Number.isFinite(candidate.downloadUntil) ? candidate.downloadUntil : Infinity);
+  if (ends.length) candidate.downloadUntil = Math.min(...ends);
 }
 module.exports = { evidence, apply };
