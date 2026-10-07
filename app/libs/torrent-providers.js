@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const bencode = require('bencode');
 const { ProviderStore } = require('./provider-store');
+const { ProviderIdentityCache } = require('./provider-identity-cache');
 const { profiles, defaults } = require('./provider-profiles');
 const { validate, digest, fail } = require('./provider-schema');
 const parser = require('./provider-parser');
@@ -11,6 +12,7 @@ const transport = require('./provider-http');
 const { infoSlice } = require('./provider-torrent');
 
 const store = new ProviderStore();
+const identities = new ProviderIdentityCache(store, () => Date.now());
 const bridges = new Map(); const proofs = new Map(); const states = new Map(); const busy = new Set();
 const prepared = new WeakMap();
 const terminalHistory = new Map();
@@ -187,6 +189,7 @@ async function begin (rss, supplied) {
     s.lastSuccess = Date.now(); s.error = null; s.failures = 0; s.candidates = result.candidates.length;
     s.observations = result.candidates.slice(0, 100).map(row => summary(row, c));
     s.coverage = result.coverage;
+    s.admission = { identityHits: 0, duplicateSkips: 0, metadataRequests: 0, deferredUntil: 0 };
     const candidates = result.candidates.filter(row => !parser.eligibility(row, c).length).sort((a, b) => parser.rank(a, b, c));
     if (bridge(c) && bridge(c).select) candidates.splice(0, candidates.length, ...await bridge(c).select(c, candidates));
     for (const row of candidates) {
@@ -249,7 +252,23 @@ async function prepare (rss, candidate, client) {
   const free = client.maindata.freeSpaceOnDisk;
   if (!Number.isFinite(free) || free - candidate.size * 1.01 < (client.minFreeSpace || 0)) return false;
   if (owner && owner.beforePrepare && !await owner.beforePrepare(c, candidate, client)) return false;
-  await consume(c, 'metadata');
+  const stats = state(rss.id).admission;
+  const known = await identities.get(context.version, candidate);
+  if (known) {
+    stats.identityHits++;
+    if (await knownDuplicate(rss, { ...candidate, ...known }, client)) {
+      stats.duplicateSkips++;
+      return false;
+    }
+  }
+  try { await consume(c, 'metadata'); } catch (e) {
+    if (e.code !== 'PROVIDER_BUDGET_EXHAUSTED') throw e;
+    stats.deferredUntil = (Math.floor(Date.now() / 3600000) + 1) * 3600000;
+    // This is normal scheduling deferral, not one remote error per candidate.
+    // No rejection history is written; the next fresh cycle can reconsider it.
+    throw Object.assign(new Error('PROVIDER_METADATA_DEFERRED'), { code: 'PROVIDER_METADATA_DEFERRED' });
+  }
+  stats.metadataRequests++;
   let body;
   if (owner && owner.prepare) body = await owner.prepare(c, candidate);
   else {
@@ -269,6 +288,9 @@ async function prepare (rss, candidate, client) {
   if (!Number.isSafeInteger(bytes) || bytes <= 0 || unsafe(info.name) || info.pieces.length !== Math.ceil(bytes / info['piece length']) * 20) fail('PROVIDER_TORRENT_SIZE');
   const hash = crypto.createHash('sha1').update(infoSlice(body)).digest('hex');
   const next = { ...candidate, hash, size: bytes, sizeExact: true };
+  // Retain the candidate -> exact identity binding even if a later rule rejects
+  // it. Never persist identity derived from rounded list sizes or invalid bodies.
+  await identities.put(context.version, candidate, next);
   if (parser.eligibility(next, c).length || await history(rss, next)) return false;
   if ((client.maindata.torrents || []).some(t => t.hash === hash) || await client.hasTorrent(hash)) return false;
   if (await util().getRecord('SELECT operation FROM vertex_rss_pending WHERE true_hash=? OR candidate_hash=? LIMIT 1', [hash, hash])) return false;
@@ -282,6 +304,22 @@ async function prepare (rss, candidate, client) {
   context.metadata = { hash, size: bytes, filepath };
   context.clientId = client.id;
   return true;
+}
+async function knownDuplicate (rss, candidate, client) {
+  if (await history(rss, candidate)) return true;
+  // Match the existing native same-size policy, including its cross-client and
+  // 20-minute admission window. Size is only an admission heuristic, never proof
+  // for content-group deletion. Recheck live blockers instead of caching refusal.
+  if (rss.skipSameTorrent) {
+    for (const other of Object.values(global.runningClient)) {
+      if (!other || !other.maindata || other._client.type !== 'qBittorrent') continue;
+      if (other.maindata.torrents.some(t => +t.size === candidate.size)) return true;
+    }
+    const recent = await util().getRecord('select * from torrents where size = ? and add_time > ?', [candidate.size, Math.floor(Date.now() / 1000) - 1200]);
+    if (recent && recent.id) return true;
+  }
+  if ((client.maindata.torrents || []).some(t => t.hash === candidate.hash) || await client.hasTorrent(candidate.hash)) return true;
+  return !!await util().getRecord('SELECT operation FROM vertex_rss_pending WHERE true_hash=? OR candidate_hash=? LIMIT 1', [candidate.hash, candidate.hash]);
 }
 function metadata (candidate) { const context = prepared.get(candidate) || candidate[contextKey]; return context && context.metadata; }
 function acceptsManaged (rssId, candidate) {

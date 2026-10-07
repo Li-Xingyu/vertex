@@ -505,6 +505,10 @@ class Rss {
           await this._pushTorrent(torrent, firstClient);
         }
       } catch (error) {
+        if (source && error.code === 'PROVIDER_METADATA_DEFERRED') {
+          logger.info(this.alias, '元数据预算已用尽，本轮剩余候选延后重新评估');
+          break;
+        }
         logger.error(this.alias, 'RSS候选处理失败', error.code || 'RSS_ITEM_FAILED');
         if (/^(?:DB_|SQLITE_)/.test(error.code || '') && ++databaseFailures >= 3) break;
       }
