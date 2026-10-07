@@ -5,14 +5,17 @@ const crypto = require('crypto');
 const bencode = require('bencode');
 const { ProviderStore } = require('./provider-store');
 const { ProviderIdentityCache } = require('./provider-identity-cache');
+const { ProviderMetadataGate } = require('./provider-metadata-gate');
 const { profiles, defaults } = require('./provider-profiles');
 const { validate, digest, fail } = require('./provider-schema');
 const parser = require('./provider-parser');
+const personal = require('./provider-personal');
 const transport = require('./provider-http');
 const { infoSlice } = require('./provider-torrent');
 
 const store = new ProviderStore();
 const identities = new ProviderIdentityCache(store, () => Date.now());
+const metadataGate = new ProviderMetadataGate(() => Date.now());
 const bridges = new Map(); const proofs = new Map(); const states = new Map(); const busy = new Set();
 const prepared = new WeakMap();
 const terminalHistory = new Map();
@@ -56,8 +59,11 @@ async function consume (c, kind) {
     try { b = JSON.parse(await fs.readFile(file, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') fail('PROVIDER_BUDGET_STORE'); b = {}; }
     const hour = Math.floor(Date.now() / 3600000);
     if (b.hour !== hour) b = { hour, list: 0, detail: 0, metadata: 0 };
+    // New, separate optional batch ledger. Never reset the other counters.
+    if (kind === 'personal' && b.personal === undefined) b.personal = 0;
     if (!Number.isSafeInteger(b[kind]) || b[kind] < 0) fail('PROVIDER_BUDGET_STORE');
-    if (b[kind] >= c.budgets[kind + 'PerHour']) fail('PROVIDER_BUDGET_EXHAUSTED');
+    // Metadata is counted for diagnostics only. Legacy metadataPerHour is inert.
+    if (kind !== 'metadata' && b[kind] >= c.budgets[kind + 'PerHour']) fail('PROVIDER_BUDGET_EXHAUSTED');
     b[kind]++;
     const tmp = file + '.tmp'; const f = await fs.open(tmp, 'w', 0o600);
     try { await f.writeFile(JSON.stringify(b)); await f.sync(); } finally { await f.close(); }
@@ -75,8 +81,24 @@ async function fetchList (c, preview = false, observe) {
   try {
     if (p.adapter === 'mteam-api') {
       if (!owner || !owner.list || !owner.prepare) fail('PROVIDER_DRIVER_REQUIRED');
-      // The MT bridge must reuse its existing ledger. Preview uses search only.
-      return parser.parse(await owner.list(c, { preview, charge: () => consume(c, 'list') }), c, p);
+      // The MT bridge reuses its ledgers. Preview never requests metadata;
+      // optional account-status batches use a separate counter, not list/detail.
+      const body = await owner.list(c, {
+        preview,
+        charge: () => consume(c, 'list'),
+        ...(c.personalStateRules?.length && c.budgets.personalPerHour ? { personalCharge: () => consume(c, 'personal') } : {})
+      });
+      const result = parser.parse(body, c, p);
+      // Only normalized counters/codes from the private driver are exposed.
+      if (body?.personalCoverage) {
+        const pc = body.personalCoverage;
+        result.coverage.personal = {
+          requested: Number(pc.requested) || 0,
+          active: Number(pc.active) || 0,
+          outcome: ['ok', 'cached', 'fallback', 'disabled'].includes(pc.outcome) ? pc.outcome : 'fallback'
+        };
+      }
+      return result;
     }
     const start = Date.now(); const t = c.listTimeouts;
     const remainingCycle = () => {
@@ -104,6 +126,7 @@ async function fetchList (c, preview = false, observe) {
       if (observe) observe({ text, url: u.toString() });
       for (const row of result.candidates) {
         const old = all.get(row.candidateKey);
+        if (old) personal.merge(old, row);
         if (old && ['downloadFactor', 'uploadFactor', 'downloadUntil', 'uploadUntil', 'downloadUnlimited', 'uploadUnlimited', 'hrState', 'size'].some(k => old[k] !== row[k])) old.conflict = true;
         else if (!old) all.set(row.candidateKey, row);
       }
@@ -122,13 +145,13 @@ async function fetchList (c, preview = false, observe) {
 }
 function summary (candidate, c) {
   const { candidateKey, name, size, seeders, leechers, pubTime, fetchedAt, downloadFactor, uploadFactor, downloadUntil, uploadUntil, downloadUnlimited, uploadUnlimited, hrState, hrEvidence } = candidate;
-  return { candidateKey, name, size, seeders, leechers, pubTime, fetchedAt, downloadFactor, uploadFactor, downloadUntil, uploadUntil, downloadUnlimited, uploadUnlimited, hrState, hrEvidence, reasons: parser.eligibility(candidate, c), scope: 'source-filters-only' };
+  return { candidateKey, name, size, seeders, leechers, pubTime, fetchedAt, downloadFactor, uploadFactor, downloadUntil, uploadUntil, downloadUnlimited, uploadUnlimited, hrState, hrEvidence, personalState: candidate.personalState || 'unknown', reasons: [...parser.eligibility(candidate, c), ...(personal.active(candidate, c, Date.now() / 1000) ? ['personal-active'] : [])], scope: 'source-filters-only' };
 }
 function checkCss (c) {
   if (profiles[c.profile].adapter === 'mteam-api') return;
   const { JSDOM } = require('jsdom'); const dom = new JSDOM('<table><tr><td></td></tr></table>');
   try {
-    const selectors = [c.mapping.rows, c.mapping.authenticated, ...Object.values(c.mapping.fields).flatMap(f => [f.selector, f.header]), ...c.promotionRules.map(r => r.selector), ...c.hrRules.map(r => r.selector), ...(c.hrAbsence ? c.hrAbsence.rowSelectors : [])];
+    const selectors = [c.mapping.rows, c.mapping.authenticated, ...Object.values(c.mapping.fields).flatMap(f => [f.selector, f.header]), ...c.promotionRules.map(r => r.selector), ...c.hrRules.map(r => r.selector), ...(c.personalStateRules || []).map(r => r.selector), ...(c.hrAbsence ? c.hrAbsence.rowSelectors : [])];
     for (const selector of selectors.filter(Boolean)) dom.window.document.querySelector(selector);
   } catch (_) { fail('PROVIDER_SELECTOR_INVALID'); } finally { dom.window.close(); }
 }
@@ -180,6 +203,8 @@ async function begin (rss, supplied) {
   if (supplied) fail('PROVIDER_EXTERNAL_FEED_CONFLICT');
   const s = state(rss.id); const now = Date.now();
   if (now < s.nextAttempt) return { candidates: [] };
+  // A known remote backoff is scheduling state, not a new network failure.
+  if (now < (backoffUntil.get(c.profile) || 0)) return { candidates: [], deferred: 'site-backoff' };
   s.lastAttempt = now; s.nextAttempt = now + c.intervalSeconds * 1000;
   try {
     const result = await fetchList(c);
@@ -189,8 +214,11 @@ async function begin (rss, supplied) {
     s.lastSuccess = Date.now(); s.error = null; s.failures = 0; s.candidates = result.candidates.length;
     s.observations = result.candidates.slice(0, 100).map(row => summary(row, c));
     s.coverage = result.coverage;
-    s.admission = { identityHits: 0, duplicateSkips: 0, metadataRequests: 0, deferredUntil: 0 };
-    const candidates = result.candidates.filter(row => !parser.eligibility(row, c).length).sort((a, b) => parser.rank(a, b, c));
+    s.admission = { siteActiveSkips: 0, identityHits: 0, duplicateSkips: 0, metadataRequests: 0, deferredUntil: 0, deferReason: null };
+    const candidates = result.candidates.filter(row => {
+      if (personal.active(row, c, Date.now() / 1000)) { s.admission.siteActiveSkips++; return false; }
+      return !parser.eligibility(row, c).length;
+    }).sort((a, b) => parser.rank(a, b, c));
     if (bridge(c) && bridge(c).select) candidates.splice(0, candidates.length, ...await bridge(c).select(c, candidates));
     for (const row of candidates) {
       row.hash = 'provider:' + row.candidateKey; row.id = row.torrentId; row.description = '';
@@ -239,10 +267,23 @@ async function history (rss, candidate) {
 async function prepare (rss, candidate, client) {
   const context = prepared.get(candidate);
   if (!context || context.rss !== rss) fail('PROVIDER_CANDIDATE_CONTEXT');
+  // Reentrant calls for the same candidate share one complete, guarded result.
+  // Other same-site work is deferred rather than building a stale request queue.
+  if (context.preparing) return context.preparing;
+  const c = context.version.config;
+  context.preparing = metadataGate.run(c.profile, identities.key(context.version, candidate), () => prepareCandidate(rss, candidate, client, context), notice => {
+    const stats = state(rss.id).admission;
+    stats.deferredUntil = notice.until; stats.deferReason = notice.reason;
+    // Respect remote site-wide backoff on the next list request too.
+    if (notice.scope === 'site' && notice.reason !== 'detail-budget') backoffUntil.set(c.profile, notice.until);
+  });
+  try { return await context.preparing; } finally { delete context.preparing; }
+}
+async function prepareCandidate (rss, candidate, client, context) {
   const c = context.version.config; const p = profiles[c.profile]; const owner = bridge(c);
   const current = await active(rss.id);
   if (!current || current.suspended || current.digest !== context.version.digest) fail('PROVIDER_CONFIG_CHANGED');
-  if (parser.eligibility(candidate, c).length || await history(rss, candidate)) return false;
+  if (personal.active(candidate, c, Date.now() / 1000) || parser.eligibility(candidate, c).length || await history(rss, candidate)) return false;
   const pending = await util().getRecords('SELECT candidate_hash,payload FROM vertex_rss_pending WHERE rss_id=? LIMIT 501', [rss.id]);
   if (pending.length > 500) fail('PROVIDER_PENDING_COVERAGE_LIMIT');
   for (const item of pending) {
@@ -261,13 +302,7 @@ async function prepare (rss, candidate, client) {
       return false;
     }
   }
-  try { await consume(c, 'metadata'); } catch (e) {
-    if (e.code !== 'PROVIDER_BUDGET_EXHAUSTED') throw e;
-    stats.deferredUntil = (Math.floor(Date.now() / 3600000) + 1) * 3600000;
-    // This is normal scheduling deferral, not one remote error per candidate.
-    // No rejection history is written; the next fresh cycle can reconsider it.
-    throw Object.assign(new Error('PROVIDER_METADATA_DEFERRED'), { code: 'PROVIDER_METADATA_DEFERRED' });
-  }
+  await consume(c, 'metadata');
   stats.metadataRequests++;
   let body;
   if (owner && owner.prepare) body = await owner.prepare(c, candidate);

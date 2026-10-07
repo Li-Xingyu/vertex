@@ -22,7 +22,7 @@ function mapping (m) {
 }
 function validate (c, profiles) {
   if (JSON.stringify(c).length > 32768) fail('PROVIDER_CONFIG_TOO_LARGE');
-  keys(c, ['version', 'profile', 'rssId', 'credentialRef', 'intervalSeconds', 'pages', 'pageSize', 'params', 'mapping', 'promotionRules', 'hrRules', 'hrAbsence', 'selection', 'budgets', 'listTimeouts'], 'CONFIG');
+  keys(c, ['version', 'profile', 'rssId', 'credentialRef', 'intervalSeconds', 'pages', 'pageSize', 'params', 'mapping', 'promotionRules', 'hrRules', 'hrAbsence', 'personalStateRules', 'selection', 'budgets', 'listTimeouts'], 'CONFIG');
   const p = profiles[c.profile];
   if (c.version !== 1 || !p || !/^[a-f0-9]{8}$/.test(c.rssId || '')) fail('PROVIDER_ID');
   if (!/^(site:[A-Za-z0-9_-]{1,48}|rss:[a-f0-9]{8}|driver)$/.test(c.credentialRef || '')) fail('PROVIDER_CREDENTIAL_REF');
@@ -56,6 +56,17 @@ function validate (c, profiles) {
     if (r.text !== undefined && (!r.selector || !str(r.text, 80) || !r.text.trim())) fail('PROVIDER_HR_TEXT');
     if (!['required', 'exempt'].includes(r.state)) fail('PROVIDER_HR_STATE');
   }
+  if (c.personalStateRules !== undefined) {
+    if (!Array.isArray(c.personalStateRules) || c.personalStateRules.length > 12) fail('PROVIDER_PERSONAL_RULES');
+    for (const r of c.personalStateRules) {
+      keys(r, ['selector', 'path', 'equals', 'state', 'format'], 'PERSONAL');
+      marker(r);
+      if ((p.adapter === 'mteam-api') !== !!r.path) fail('PROVIDER_PERSONAL_RULES');
+      if (r.format === 'nexus-progress') {
+        if (!r.selector || r.state !== undefined) fail('PROVIDER_PERSONAL_RULES');
+      } else if (r.format !== undefined || !['seeding', 'downloading', 'inactive'].includes(r.state)) fail('PROVIDER_PERSONAL_RULES');
+    }
+  }
   // Opt-in site semantics, not a global fallback. Old saved configs stay unknown.
   if (c.hrAbsence !== undefined) {
     keys(c.hrAbsence, ['rowSelectors'], 'HR_ABSENCE');
@@ -68,8 +79,11 @@ function validate (c, profiles) {
   if (typeof s.freeOnly !== 'boolean' || typeof s.preferUploadFactor !== 'boolean' || !['protect', 'exclude'].includes(s.hrPolicy) || !['publishedAt', 'demand'].includes(s.sort)) fail('PROVIDER_SELECTION');
   for (const k of ['minGiB', 'maxGiB', 'minSeeders', 'minLeechers', 'maxAgeHours', 'minFreeSeconds']) if (typeof s[k] !== 'number' || !Number.isFinite(s[k]) || s[k] < 0 || s[k] > 100000) fail('PROVIDER_THRESHOLD');
   if (s.maxGiB <= s.minGiB || s.maxAgeHours <= 0 || !Number.isInteger(s.minSeeders) || !Number.isInteger(s.minLeechers)) fail('PROVIDER_THRESHOLD');
-  keys(c.budgets, ['listPerHour', 'detailPerHour', 'metadataPerHour'], 'BUDGETS');
-  for (const k of Object.keys(c.budgets)) if (!integer(c.budgets[k], 1, p.budgetCaps[k])) fail('PROVIDER_BUDGET');
+  keys(c.budgets, ['listPerHour', 'detailPerHour', 'metadataPerHour', 'personalPerHour'], 'BUDGETS');
+  // Retain old config bytes/digests on read. This retired field has no effect;
+  // new templates/UI omit it rather than inventing a large "unlimited" number.
+  for (const k of Object.keys(c.budgets)) if (!integer(c.budgets[k], k === 'metadataPerHour' ? 0 : 1, k === 'metadataPerHour' ? Number.MAX_SAFE_INTEGER : p.budgetCaps[k])) fail('PROVIDER_BUDGET');
+  if (c.budgets.personalPerHour !== undefined && p.adapter !== 'mteam-api') fail('PROVIDER_BUDGET');
   return JSON.parse(JSON.stringify(c));
 }
 function marker (r) {

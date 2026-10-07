@@ -4,6 +4,7 @@
 // edits are revisioned separately. HR absence requires explicit site semantics
 // and a complete authenticated row; it is never a global fallback.
 const profiles = require('./provider-profiles.json');
+const personalRules = require('./provider-personal-rules.json');
 const clone = x => JSON.parse(JSON.stringify(x));
 function defaults (profile, rssId) {
   const p = profiles[profile];
@@ -24,9 +25,10 @@ function defaults (profile, rssId) {
     mapping,
     promotionRules: clone(p.promotionRules || profiles.NEXUS_TEMPLATE.promotionRules),
     hrRules: clone(p.hrRules || profiles.NEXUS_TEMPLATE.hrRules),
+    personalStateRules: clone(personalRules[profile] || []),
     ...(p.hrAbsence ? { hrAbsence: clone(p.hrAbsence) } : {}),
     selection: { freeOnly: ['MTEAM', 'HHCLUB'].includes(profile), hrPolicy: profile === 'HHCLUB' ? 'exclude' : 'protect', minGiB: 0, maxGiB: 600, minSeeders: 1, minLeechers: 1, maxAgeHours: 168, minFreeSeconds: 7200, sort: 'publishedAt', preferUploadFactor: true },
-    budgets: { listPerHour: 12, detailPerHour: 12, metadataPerHour: 12 }
+    budgets: { listPerHour: 12, detailPerHour: 12, ...(p.adapter === 'mteam-api' ? { personalPerHour: 12 } : {}) }
   };
 }
 module.exports = { profiles: Object.fromEntries(Object.entries(profiles).filter(([k]) => k !== 'NEXUS_TEMPLATE')), defaults };

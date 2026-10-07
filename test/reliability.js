@@ -430,15 +430,27 @@ async function main () {
     const f = await scenario({ provider }); await f.makeRss().rss();
     assert.equal(f.posted.length, 0); assert.equal((await f.util.getRecord('SELECT count(*) AS n FROM vertex_rss_pending')).n, 0);
   });
-  await test('metadata quota defers a whole provider cycle without per-candidate errors or rejection history', async () => {
+  await test('site backoff defers a whole provider cycle without per-candidate errors or rejection history', async () => {
     let attempts = 0;
-    const provider = { begin: async () => ({ candidates: [torrent(903), torrent(904), torrent(905)] }), prepare: async () => { attempts++; throw Object.assign(Error('deferred'), { code: 'PROVIDER_METADATA_DEFERRED' }); } };
+    const provider = { begin: async () => ({ candidates: [torrent(903), torrent(904), torrent(905)] }), prepare: async () => { attempts++; throw Object.assign(Error('deferred'), { code: 'PROVIDER_METADATA_BACKOFF', metadataScope: 'site' }); } };
     const f = await scenario({ provider }); const r = f.makeRss(); r.lastRssTime = f.now() - 100;
     await r.rss();
     assert.equal(attempts, 1); assert.equal(f.errors.length, 0); assert.equal(r.rssBusy, false); assert.equal(r.lastRssTime, f.now());
     assert.equal(f.posted.length, 0); assert.equal(f.notices.length, 0);
     assert.equal((await f.util.getRecord('SELECT count(*) AS n FROM torrents')).n, 0);
     assert.equal((await f.util.getRecord('SELECT count(*) AS n FROM vertex_rss_pending')).n, 0);
+  });
+  await test('candidate backoff does not block the next candidate and creates no rejection record', async () => {
+    let attempts = 0;
+    const provider = {
+      begin: async () => ({ candidates: [torrent(906), torrent(907)] }),
+      prepare: async () => {
+        attempts++; if (attempts === 1) throw Object.assign(Error('deferred'), { code: 'PROVIDER_METADATA_BACKOFF', metadataScope: 'candidate' }); return false;
+      }
+    };
+    const f = await scenario({ provider }); await f.makeRss().rss();
+    assert.equal(attempts, 2); assert.equal(f.errors.length, 0); assert.equal(f.posted.length, 0);
+    assert.equal((await f.util.getRecord('SELECT count(*) AS n FROM torrents')).n, 0);
   });
   process.stdout.write(JSON.stringify({
     ok: true,

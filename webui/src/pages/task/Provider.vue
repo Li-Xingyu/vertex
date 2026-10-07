@@ -17,7 +17,7 @@
             <a-tag :color="record.suspended ? 'warning' : record.active === null ? 'default' : 'success'">{{ runtimeLabel(record) }}</a-tag>
             <small v-if="rssDisabled(record.id)" class="provider-secondary provider-block">原 RSS 任务未启用</small>
           </template>
-          <template v-else-if="column.key === 'time'"><span>{{ timestamp(record.status?.lastSuccess) }}</span><div v-if="record.status?.error" class="provider-status-error">{{ explain(record.status.error) }}</div></template>
+          <template v-else-if="column.key === 'time'"><span>{{ timestamp(record.status?.lastSuccess) }}</span><div v-if="record.status?.error" class="provider-status-error">{{ explain(record.status.error) }}</div><small v-if="record.status?.admission" class="provider-secondary provider-block">本轮：站内活动跳过 {{ record.status.admission.siteActiveSkips || 0 }} · 缓存确认重复 {{ record.status.admission.duplicateSkips || 0 }} · 元数据请求 {{ record.status.admission.metadataRequests || 0 }}</small><small v-if="record.status?.coverage?.personal?.outcome === 'fallback'" class="provider-secondary provider-block">个人状态查询不可用或额度已用完，本轮使用本地去重。</small></template>
           <template v-else-if="column.key === 'actions'"><a-button type="link" size="small" :disabled="busy" :aria-label="'编辑 ' + rssName(record.id)" @click="edit(record)">编辑</a-button></template>
         </template>
       </a-table>
@@ -50,6 +50,7 @@
                 <a-form-item v-if="!jsonMode" label="请求参数" :extra="'已有 ' + Object.keys(config.params).length + ' 项参数继续生效；折叠不会清空。'"><a-checkbox v-model:checked="showParams" :disabled="busy">显示站内分类、排序等高级参数</a-checkbox></a-form-item>
                 <template v-if="showParams || jsonMode"><a-form-item v-for="key in selectedProfile.queryKeys" :key="key" :label="parameterLabel(key)" :name="['params', key]" :extra="'请求参数：' + key + '；留空则不发送。'"><a-input size="small" :value="config.params[key]" :disabled="busy" @update:value="parameter(key, $event)" /></a-form-item></template>
                 <a-form-item v-for="(label, key) in budgetLabels" :key="key" :label="label" :name="['budgets', key]" :rules="numberRules(1, selectedProfile.budgetCaps[key], true)" :extra="budgetHelp(key)"><a-input-number size="small" v-model:value="config.budgets[key]" :min="1" :max="selectedProfile.budgetCaps[key]" :precision="0" :disabled="busy || (key === 'detailPerHour' && !jsonMode)" /></a-form-item>
+                <a-form-item label="种子文件请求"><span class="provider-secondary">不设小时配额（旧元数据额度不再生效）。先去重、同站不重叠请求，失败退避；站点限流仍会等待。</span></a-form-item>
                 <template v-if="!jsonMode">
                   <a-form-item label="列表请求超时" extra="仅影响列表页请求，不增加请求预算、不自动重试，也不改变种子文件下载超时。"><a-checkbox :checked="!!config.listTimeouts" :disabled="busy" @update:checked="setTimeouts">分别配置连接、读取和总时长</a-checkbox></a-form-item>
                   <template v-if="config.listTimeouts"><a-form-item v-for="(item, key) in timeoutFields" :key="key" :label="item.label" :name="['listTimeouts', key]" :rules="timeoutRules(key)" :extra="item.help"><a-input-number :id="'provider-' + key" size="small" v-model:value="config.listTimeouts[key]" :min="1" :max="item.max" :precision="0" :disabled="busy" /></a-form-item></template>
@@ -102,6 +103,20 @@
                   </div>
                 </div>
                 <a-button size="small" :disabled="busy || config.hrRules.length >= 12" @click="addHr">新增 H&R 标记</a-button>
+                <h3 class="provider-subtitle">个人下载／做种状态</h3>
+                <p class="provider-secondary">仅明确“正在下载／做种”时本轮提前跳过。不活跃、历史完成、缺标记或冲突仍走本地去重；不会永久拒绝，也不作为 H&R 达标证明。</p>
+                <p v-if="jsonMode" class="provider-secondary">MT 使用批量个人状态查询，最多每批 200 个；单独使用个人状态预算，不占用列表或详情预算。查询失败回退本地去重。</p>
+                <p v-if="!config.personalStateRules?.length" class="provider-secondary">未配置个人状态规则，使用本地去重。</p>
+                <div v-for="(r, i) in config.personalStateRules || []" :key="i" class="provider-marker">
+                  <div class="provider-marker-heading"><span>个人状态 {{ i + 1 }}</span><a-button type="link" danger size="small" :aria-label="'移除个人状态 ' + (i + 1)" :disabled="busy" @click="config.personalStateRules.splice(i, 1)">移除</a-button></div>
+                  <div class="provider-marker-fields">
+                    <div class="provider-marker-selector"><label :for="'personal-selector-' + i">{{ jsonMode ? 'JSON 路径' : '行内 CSS 选择器' }}</label><a-input :id="'personal-selector-' + i" size="small" v-model:value="r[jsonMode ? 'path' : 'selector']" :disabled="busy" /></div>
+                    <div v-if="jsonMode"><label :for="'personal-value-' + i">匹配值</label><a-input :id="'personal-value-' + i" size="small" :value="enumText(r.equals)" :disabled="busy" @update:value="setEnum(r, $event)" /></div>
+                    <div><label :for="'personal-state-' + i">识别方式／结果</label><a-select :id="'personal-state-' + i" size="small" :value="r.format || r.state" :disabled="busy" :options="personalOptions" @update:value="setPersonalState(r, $event)" /></div>
+                  </div>
+                </div>
+                <a-button size="small" :disabled="busy || (config.personalStateRules || []).length >= 12" @click="addPersonal">新增个人状态规则</a-button>
+                <a-form-item v-if="jsonMode" label="个人状态批量预算" extra="每小时请求次数；一批最多 200 个，不是新增下载数量限制。留空则不查询。"><a-input-number size="small" :value="config.budgets.personalPerHour" :min="1" :max="selectedProfile.budgetCaps.personalPerHour" :precision="0" :disabled="busy" @update:value="setPersonalBudget" /></a-form-item>
                 <template v-if="!jsonMode">
                   <a-form-item label="按站规识别无标签种子" extra="仅适用于已确认“有 H&R 必显示标签”的站点。有 H&R 标记或证据冲突时不放行；页面/种子行未闭合、结构或关键字段缺失时仍为未知。不代表站内 H&R 已达标。"><a-switch size="small" :checked="!!config.hrAbsence" :disabled="busy" @change="setHrAbsence" /></a-form-item>
                   <a-form-item v-if="config.hrAbsence" label="种子行完整性选择器" extra="每行一个，全部必须在当前种子行内匹配；最多 8 个。"><a-textarea size="small" :value="config.hrAbsence.rowSelectors.join('\n')" :disabled="busy" :auto-size="{minRows:2,maxRows:8}" @update:value="config.hrAbsence.rowSelectors = $event.split('\n')" /></a-form-item>
@@ -112,13 +127,14 @@
                 <a-button :loading="operation === 'preview'" :disabled="busy" @click="preview">{{ previewResult ? '重新预览' : '请求一页预览' }}</a-button>
                 <template v-if="previewResult">
                   <div class="provider-preview-summary" aria-live="polite"><a-tag>返回 {{ previewResult.candidates.length }} 条</a-tag><a-tag color="success">来源筛选通过 {{ previewResult.eligible }} 条</a-tag><span class="provider-secondary">{{ previewValid ? '本次预览有效至 ' + timestamp(previewResult.expiresAt) : '预览已过期，请重新请求' }}</span></div>
-                  <a-table :columns="candidateColumns" :data-source="previewResult.candidates" row-key="candidateKey" :scroll="{ x: 1080 }" :pagination="{ pageSize: 10, showSizeChanger: false }" size="small">
+                  <a-table :columns="candidateColumns" :data-source="previewResult.candidates" row-key="candidateKey" :scroll="{ x: 1235 }" :pagination="{ pageSize: 10, showSizeChanger: false }" size="small">
                     <template #bodyCell="{column, record}">
                       <template v-if="column.key === 'size'">{{ record.size == null ? '未知' : (record.size / 1024 ** 3).toFixed(2) + ' GiB' }}</template>
                       <template v-else-if="column.key === 'seeders'">{{ record.seeders ?? '未知' }}</template>
                       <template v-else-if="column.key === 'leechers'">{{ record.leechers ?? '未知' }}</template>
                       <template v-else-if="column.key === 'promotion'">下载 {{ factor(record.downloadFactor) }}<br>上传 {{ factor(record.uploadFactor) }}</template>
                       <template v-else-if="column.key === 'hr'">{{ {required:'有 H&R', exempt:'无 H&R 要求', unknown:'未知'}[record.hrState] || '未知' }}</template>
+                      <template v-else-if="column.key === 'personal'">{{ {seeding:'正在做种', downloading:'正在下载', inactive:'不活跃／历史', unknown:'未知（本地核对）'}[record.personalState] || '未知（本地核对）' }}</template>
                       <template v-else-if="column.key === 'reason'"><a-tag v-if="!record.reasons.length" color="success">通过来源筛选</a-tag><span v-else>{{ record.reasons.map(reason).join('；') }}</span></template>
                     </template>
                   </a-table>
@@ -175,7 +191,8 @@ const errors = {
   PROVIDER_POLL_LIMIT: '轮询间隔或页数超出允许范围，请检查“基础设置”。',
   PROVIDER_THRESHOLD: '筛选阈值无效，请检查体积范围、人数与种龄。',
   PROVIDER_BUDGET: '请求预算超出站点模板允许范围。',
-  PROVIDER_MARKER: '促销或 H&R 标记不能为空，请检查“解析规则”。'
+  PROVIDER_MARKER: '促销、H&R 或个人状态标记不能为空，请检查“解析规则”。',
+  PROVIDER_PERSONAL_RULES: '个人状态规则无效，请检查“解析规则”的识别方式与选择器。'
 };
 export default {
   data () {
@@ -183,8 +200,8 @@ export default {
       data: { profiles: [], records: [], rss: [], credentials: [] }, createForm: { rssId: undefined, profile: undefined },
       config: null, operation: '', listError: '', error: '', notice: '', tab: 'source', showParams: false, discardPromise: null, savedJson: '', expectedRevision: 0, applyUncertain: false, previewResult: null, previewJson: '', viewportWidth: window.innerWidth, now: Date.now(), clockTimer: null,
       sourceColumns: [{ title: '任务 / 站点', key: 'source', width: 230 }, { title: '运行状态', key: 'state', width: 190 }, { title: '最近列表成功', key: 'time', width: 260 }, { title: '操作', key: 'actions', width: 80 }],
-      candidateColumns: [{ title: '候选', dataIndex: 'name', ellipsis: true, width: 270 }, { title: '体积（展示值）', key: 'size', width: 145 }, { title: '做种', key: 'seeders', width: 70 }, { title: '下载', key: 'leechers', width: 70 }, { title: '促销识别', key: 'promotion', width: 140 }, { title: 'H&R', key: 'hr', width: 110 }, { title: '来源筛选原因', key: 'reason', width: 260 }],
-      budgetLabels: { listPerHour: '列表请求预算', detailPerHour: '详情请求预算', metadataPerHour: '元数据预算' },
+      candidateColumns: [{ title: '候选', dataIndex: 'name', ellipsis: true, width: 270 }, { title: '体积（展示值）', key: 'size', width: 145 }, { title: '做种', key: 'seeders', width: 70 }, { title: '下载', key: 'leechers', width: 70 }, { title: '促销识别', key: 'promotion', width: 140 }, { title: 'H&R', key: 'hr', width: 110 }, { title: '个人状态', key: 'personal', width: 170 }, { title: '来源筛选原因', key: 'reason', width: 260 }],
+      budgetLabels: { listPerHour: '列表请求预算', detailPerHour: '详情请求预算' },
       timeoutFields: {
         connectSeconds: { label: '连接上限（秒）', max: 30, help: '包含域名解析、TCP 连接及 TLS 握手。' },
         readSeconds: { label: '读取空闲（秒）', max: 60, help: '连接建立后等待响应及相邻数据之间的最长等待，不是整页耗时。' },
@@ -207,6 +224,7 @@ export default {
     selectedRecord () { return this.config && this.data.records.find(r => r.id === this.config.rssId); },
     selectedProfile () { return this.data.profiles.find(p => p.id === this.config?.profile) || { queryKeys: [], budgetCaps: {} }; },
     jsonMode () { return this.selectedProfile.adapter === 'mteam-api'; },
+    personalOptions () { return [...(this.jsonMode ? [] : [{ value: 'nexus-progress', label: 'Nexus 标准 title 状态＋进度' }]), { value: 'seeding', label: '正在做种' }, { value: 'downloading', label: '正在下载' }, { value: 'inactive', label: '不活跃／历史' }]; },
     availableRss () { return this.data.rss.filter(r => !this.data.records.some(record => record.id === r.id)); },
     fieldRows () { return Object.entries(this.config.mapping.fields).map(([key, value]) => ({ key, value })); },
     mappingColumns () { return [{ title: '字段', key: 'field', width: 145 }, { title: this.jsonMode ? 'JSON 路径' : '行内 CSS 选择器', key: 'selector', width: 290 }, ...(this.jsonMode ? [] : [{ title: '备用表头特征', key: 'header', width: 190 }, { title: '读取属性', key: 'attribute', width: 120 }, { title: 'ID 查询参数', key: 'query', width: 100 }])]; },
@@ -228,7 +246,7 @@ export default {
   watch: { config: { deep: true, handler () { if (this.previewResult && this.previewJson !== JSON.stringify(this.config)) { this.previewResult = null; this.previewJson = ''; } } } },
   methods: {
     explain (code) { return errors[code] || (/^PROVIDER_/.test(code || '') ? '配置或采集校验失败（' + code + '），请核对当前设置。' : '操作失败，请检查服务连接后重试。当前输入已保留。'); },
-    reason (key) { return ({ 'conflicting-evidence': '证据冲突', stale: '数据过期', 'missing-fields': '关键字段未知', size: '体积范围', 'supply-demand': '供需不达标', age: '种龄/时间异常', 'hr-not-exempt': '未明确免 H&R', 'not-confirmed-free': '未确认免费', 'free-expiry-unverified': '免费期限未知或不足' })[key] || key; },
+    reason (key) { return ({ 'personal-active': '站内当前账号正在下载／做种', 'conflicting-evidence': '证据冲突', stale: '数据过期', 'missing-fields': '关键字段未知', size: '体积范围', 'supply-demand': '供需不达标', age: '种龄/时间异常', 'hr-not-exempt': '未明确免 H&R', 'not-confirmed-free': '未确认免费', 'free-expiry-unverified': '免费期限未知或不足' })[key] || key; },
     factor (v) { return v == null ? '未知' : v + '×'; },
     timestamp (v) { return v ? this.$moment(v).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'; },
     rssName (id) { return this.data.rss.find(r => r.id === id)?.alias || id; },
@@ -261,7 +279,7 @@ export default {
       try { await fn(); } catch (e) {
         if (e.errorFields?.length) {
           const field = e.errorFields[0].name;
-          this.tab = ['mapping', 'promotionRules', 'hrRules', 'hrAbsence'].includes(field[0]) ? 'mapping' : field[0] === 'selection' ? 'selection' : 'source';
+          this.tab = ['mapping', 'promotionRules', 'hrRules', 'hrAbsence', 'personalStateRules'].includes(field[0]) ? 'mapping' : field[0] === 'selection' ? 'selection' : 'source';
           await this.$nextTick(); this.$refs.configForm?.scrollToField(field, { block: 'center' }); this.error = '请先修正表单中标出的字段。';
         } else if (action === 'refresh') this.listError = this.explain(e.message);
         else this.error = this.explain(e.message);
@@ -296,6 +314,9 @@ export default {
     async create () { await this.run('create', async () => { this.config = await api.call('defaults?profile=' + encodeURIComponent(this.createForm.profile) + '&rssId=' + encodeURIComponent(this.createForm.rssId)); this.savedJson = ''; this.expectedRevision = 0; this.applyUncertain = false; this.tab = 'source'; this.previewResult = null; this.previewJson = ''; this.notice = '模板已载入，请核对实际阈值与解析结果。'; await this.focusEditor(); }); },
     addPromotion () { this.config.promotionRules.push({ ...(this.jsonMode ? { path: '', equals: '' } : { selector: '' }), downloadFactor: null, uploadFactor: null }); },
     addHr () { this.config.hrRules.push({ ...(this.jsonMode ? { path: '', equals: '' } : { selector: '' }), state: 'required' }); },
+    addPersonal () { if (!this.config.personalStateRules) this.config.personalStateRules = []; this.config.personalStateRules.push(this.jsonMode ? { path: '_vertex.personalState', equals: 'seeding', state: 'seeding' } : { selector: '[title]', format: 'nexus-progress' }); },
+    setPersonalState (r, value) { if (value === 'nexus-progress') { r.format = value; delete r.state; } else { r.state = value; delete r.format; } },
+    setPersonalBudget (value) { if (value == null) delete this.config.budgets.personalPerHour; else this.config.budgets.personalPerHour = value; },
     setHrText (rule, text) { if (text.trim()) rule.text = text; else delete rule.text; },
     setHrAbsence (enabled) { if (enabled) this.config.hrAbsence = { rowSelectors: [''] }; else delete this.config.hrAbsence; },
     async validateForm () { await this.$refs.configForm.validateFields(); },

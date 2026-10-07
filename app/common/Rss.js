@@ -505,8 +505,12 @@ class Rss {
           await this._pushTorrent(torrent, firstClient);
         }
       } catch (error) {
-        if (source && error.code === 'PROVIDER_METADATA_DEFERRED') {
-          logger.info(this.alias, '元数据预算已用尽，本轮剩余候选延后重新评估');
+        if (source && error.code === 'PROVIDER_METADATA_BUSY') continue;
+        if (source && error.metadataScope) {
+          // A real failure is reported once, never as a permanent rejection.
+          if (error.code !== 'PROVIDER_METADATA_BACKOFF') logger.error(this.alias, '种子准备失败，退避后重新评估', providers.cleanCode(error));
+          if (error.metadataScope === 'candidate') continue;
+          logger.info(this.alias, '站点请求退避中，本轮剩余候选延后重新评估');
           break;
         }
         logger.error(this.alias, 'RSS候选处理失败', error.code || 'RSS_ITEM_FAILED');

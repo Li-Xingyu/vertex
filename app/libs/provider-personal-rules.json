@@ -1,0 +1,22 @@
+{
+  "CARPT": [{"selector":"[title]","format":"nexus-progress"}],
+  "ZMPT": [{"selector":"[title]","format":"nexus-progress"}],
+  "KUFEI": [{"selector":"[title]","format":"nexus-progress"}],
+  "HDKYLIN": [{"selector":"[title]","format":"nexus-progress"}],
+  "HDFANS": [{"selector":"[title]","format":"nexus-progress"}],
+  "HHCLUB": [{"selector":"[title]","format":"nexus-progress"}],
+  "NANYANG": [
+    {"selector":"td[title=\"Seeding\"]","state":"seeding"},
+    {"selector":"td[title=\"Downloading\"]","state":"downloading"}
+  ],
+  "BTSCHOOL": [
+    {"selector":".progressarea[title=\"做种中\"] .progress_seeding","state":"seeding"},
+    {"selector":".progressarea[title*=\"正在下载\"] .progress_downloading","state":"downloading"},
+    {"selector":".progressarea .progress_completed, .progressarea .progress_no_downloading","state":"inactive"}
+  ],
+  "HAIDAN": [],
+  "MTEAM": [
+    {"path":"_vertex.personalState","equals":"seeding","state":"seeding"},
+    {"path":"_vertex.personalState","equals":"downloading","state":"downloading"}
+  ]
+}

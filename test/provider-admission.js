@@ -29,12 +29,12 @@ async function fixture (profile = 'CARPT') {
   const client = { id: '12345678', _client: { type: 'qBittorrent' }, maindata: { freeSpaceOnDisk: 10 ** 13, torrents: [] }, hasTorrent: async hash => f.remoteHashes.has(hash) };
   const rss = { id: cfg.rssId, clientArr: [client.id], skipSameTorrent: true };
   const globals = { runningClient: { [client.id]: client }, runningRss: { [rss.id]: rss } };
-  const f = { dir, cfg, client, rss, globals, fetches: 0, before: 0, finals: 0, remoteHashes: new Set(), rows: [], pending: [], history: [], recent: null, allow: true, finalAllow: true, invalid: false };
+  const f = { dir, cfg, client, rss, globals, fetches: 0, dbReads: 0, before: 0, finals: 0, remoteHashes: new Set(), rows: [], pending: [], history: [], recent: null, allow: true, finalAllow: true, invalid: false };
   f.rows = [{ candidateKey: profile + ':12', siteId: profile, torrentId: '12', name: 'fixture', size: 123000, pubTime: at / 1000 - 60, fetchedAt: at / 1000, seeders: 5, leechers: 10, hrState: 'exempt', downloadFactor: 0, downloadUntil: at / 1000 + 86400, link: profiles[profile].origin + '/details.php?id=12', url: profiles[profile].origin + '/download.php?id=12' }];
   const util = {
     listRss: () => [],
     listSite: () => [],
-    getRecords: async (sql, args) => sql.includes('vertex_rss_pending') ? f.pending : f.history.filter(r => r.id > args[1]),
+    getRecords: async (sql, args) => { f.dbReads++; return sql.includes('vertex_rss_pending') ? f.pending : f.history.filter(r => r.id > args[1]); },
     getRecord: async (sql, args) => sql.includes('where size') ? f.recent : f.pending.find(r => r.true_hash === args[0] || r.candidate_hash === args[1])
   };
   f.reload = async () => {
@@ -61,10 +61,10 @@ async function fixture (profile = 'CARPT') {
     f.service.register(rss.id, {
       check: async () => {},
       credential: async () => 'fixture-only',
-      list: async (c, opts) => { await opts.charge(); return {}; },
+      list: async (c, opts) => { await opts.charge(); if (f.personalBatch && opts.personalCharge) await opts.personalCharge(); return {}; },
       beforePrepare: async () => { f.before++; return f.allow; },
       validateFinal: async () => { f.finals++; return f.finalAllow; },
-      prepare: async () => { f.fetches++; if (f.onPrepare) await f.onPrepare(); return f.invalid ? Buffer.from('not-a-torrent') : torrentBody(); }
+      prepare: async () => { f.fetches++; if (f.onPrepare) await f.onPrepare(); return f.invalid ? Buffer.from('not-a-torrent') : torrentBody(123456 + (f.unique ? f.fetches : 0)); }
     });
   };
   f.cycle = async () => { at += 300001; return (await f.service.begin(rss)).candidates; };
@@ -76,6 +76,38 @@ async function fixture (profile = 'CARPT') {
   return f;
 }
 async function main () {
+  await test('positive site state skips before DB, identity cache, driver detail or metadata', async () => {
+    const f = await fixture();
+    for (const personalState of ['seeding', 'downloading']) {
+      f.rows[0].personalState = personalState; assert.equal((await f.cycle()).length, 0);
+      assert.equal((await f.stats()).siteActiveSkips, 1);
+    }
+    assert.equal(f.dbReads, 0); assert.equal(f.before, 0); assert.equal(f.fetches, 0);
+    assert.equal(f.budget().metadata, 0); assert(!fs.existsSync(path.join(f.service.store.root, 'identity-CARPT.json')));
+  });
+  await test('a disappeared active marker is reconsidered, while inactive/history never skips local guards', async () => {
+    const f = await fixture(); f.rows[0].personalState = 'seeding'; assert.equal((await f.cycle()).length, 0);
+    for (const personalState of ['inactive', 'unknown', undefined]) {
+      f.rows[0].personalState = personalState; assert.equal(await f.prepare((await f.cycle())[0]), true);
+    }
+    assert.equal(f.fetches, 3); assert.equal(f.finals, 3); assert(f.dbReads > 0);
+  });
+  await test('Haidan local fallback still avoids repeated metadata after an exact identity is learned', async () => {
+    const f = await fixture('HAIDAN'); assert.deepEqual(f.cfg.personalStateRules, []);
+    await f.prepare((await f.cycle())[0]); f.client.maindata.torrents = [{ size: 123456 }];
+    for (let i = 0; i < 3; i++) assert.equal(await f.prepare((await f.cycle())[0]), false);
+    assert.equal(f.fetches, 1); assert.equal((await f.stats()).duplicateSkips, 1);
+  });
+  await test('MT optional personal ledger is separate and preserves existing counters across reload', async () => {
+    const f = await fixture('MTEAM'); f.personalBatch = true;
+    await f.prepare((await f.cycle())[0]); const first = f.budget();
+    assert.equal(first.personal, 1); assert.equal(first.list, 1); assert.equal(first.metadata, 1);
+    await f.reload(); f.rows[0].personalState = 'seeding'; await f.cycle();
+    assert.equal(f.budget().personal, 2); assert.equal(f.budget().metadata, 1);
+    const saved = await f.service.store.read(f.rss.id); delete f.cfg.budgets.personalPerHour;
+    await f.service.store.apply(f.cfg, saved.revision, async () => {}); await f.cycle();
+    assert.equal(f.budget().personal, 2);
+  });
   await test('nine cycles of the same rejected candidate consume metadata once, not nine times', async () => {
     const f = await fixture(); f.client.maindata.torrents = [{ size: 123456, hash: 'a'.repeat(40) }];
     assert.equal(await f.prepare((await f.cycle())[0]), true); // Native same-size rule would reject it.
@@ -155,17 +187,43 @@ async function main () {
     await f.service.store.apply(f.cfg, saved.revision, async () => {});
     assert.equal(await f.prepare((await f.cycle())[0]), true); assert.equal(f.fetches, 6);
   });
-  await test('metadata exhaustion becomes deferral without request, history write, or budget reset; next hour retries', async () => {
+  await test('legacy 24-per-hour metadata cap is inert: 30 distinct candidates proceed without resetting counters', async () => {
     const f = await fixture(); const rows = await f.cycle();
     const file = path.join(f.service.store.root, 'budget-CARPT.json'); const budget = f.budget(); budget.metadata = 24; fs.writeFileSync(file, JSON.stringify(budget));
-    await assert.rejects(() => f.prepare(rows[0]), e => e.code === 'PROVIDER_METADATA_DEFERRED');
-    assert.equal(f.fetches, 0); assert.equal(f.budget().metadata, 24); assert((await f.stats()).deferredUntil > 0);
-    f.advance(3600000); assert.equal(await f.prepare((await f.cycle())[0]), true); assert.equal(f.budget().metadata, 1);
+    f.unique = true; assert.equal(await f.prepare(rows[0]), true);
+    f.rows = Array.from({ length: 29 }, (_, i) => ({ ...f.rows[0], torrentId: String(i + 100), candidateKey: 'CARPT:' + (i + 100) }));
+    for (const row of await f.cycle()) assert.equal(await f.prepare(row), true);
+    assert.equal(f.fetches, 30); assert.equal(f.budget().metadata, 54); assert.equal((await f.stats()).deferredUntil, 0);
+    assert.equal(f.budget().list, 2);
   });
-  await test('cached duplicate is skipped even with exhausted metadata budget and no attempt is charged', async () => {
+  await test('cached duplicate skips even above old metadata quota and is not counted as a request', async () => {
     const f = await fixture(); await f.prepare((await f.cycle())[0]); f.client.maindata.torrents = [{ size: 123456 }];
     const file = path.join(f.service.store.root, 'budget-CARPT.json'); const budget = f.budget(); budget.metadata = 24; fs.writeFileSync(file, JSON.stringify(budget));
     assert.equal(await f.prepare((await f.cycle())[0]), false); assert.equal(f.budget().metadata, 24); assert.equal(f.fetches, 1);
+  });
+  await test('simultaneous preparation of the same candidate shares one guarded operation', async () => {
+    const f = await fixture(); const row = (await f.cycle())[0];
+    assert.deepEqual(await Promise.all([f.prepare(row), f.prepare(row)]), [true, true]);
+    assert.equal(f.fetches, 1); assert.equal(f.finals, 1); assert.equal(f.budget().metadata, 1);
+  });
+  await test('real 429 defers other candidates without spending counters or writing history', async () => {
+    const f = await fixture(); f.rows.push({ ...f.rows[0], torrentId: '13', candidateKey: 'CARPT:13' });
+    const rows = await f.cycle();
+    f.onPrepare = () => { throw Object.assign(Error('fixture private message'), { code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 900 }); };
+    await assert.rejects(() => f.prepare(rows[0]), e => e.metadataScope === 'site');
+    await assert.rejects(() => f.prepare(rows[1]), e => e.code === 'PROVIDER_METADATA_BACKOFF');
+    assert.equal(f.fetches, 1); assert.equal(f.budget().metadata, 1); assert.equal(f.history.length, 0);
+    assert.equal((await f.stats()).deferReason, 'rate-limit');
+    f.onPrepare = null; f.advance(900000); assert.equal(await f.prepare((await f.cycle())[0]), true);
+  });
+  await test('repeated invalid metadata cools down only that candidate, then retries normally', async () => {
+    const f = await fixture(); f.invalid = true;
+    await assert.rejects(async () => f.prepare((await f.cycle())[0]), /PROVIDER_TORRENT_RESPONSE/);
+    await assert.rejects(async () => f.prepare((await f.cycle())[0]), /PROVIDER_TORRENT_RESPONSE/);
+    f.invalid = false;
+    await assert.rejects(async () => f.prepare((await f.cycle())[0]), e => e.code === 'PROVIDER_METADATA_BACKOFF' && e.metadataScope === 'candidate');
+    assert.equal(f.fetches, 2); f.advance(600000);
+    assert.equal(await f.prepare((await f.cycle())[0]), true); assert.equal(f.fetches, 3);
   });
   await test('cache is bounded, expires, rejects future timestamps, and isolates profile/config/content', async () => {
     const store = new ProviderStore(path.join(work, 'bounded')); let clock = 1000000000;

@@ -31,6 +31,8 @@ async function main () {
   const data = JSON.parse((await request('GET', '/api/provider/list', null, cookie)).text).data;
   assert.equal(data.profiles.length, 10); assert.equal(data.records.length, 0);
   const cfg = JSON.parse((await request('GET', '/api/provider/defaults?profile=NANYANG&rssId=1234abcd', null, cookie)).text).data;
+  assert(!Object.hasOwnProperty.call(cfg.budgets, 'metadataPerHour'));
+  assert(data.profiles.every(p => !Object.hasOwnProperty.call(p.budgetCaps, 'metadataPerHour')));
   const bad = await request('POST', '/api/provider/apply', { config: cfg, expectedRevision: 0 }, cookie, false); assert.equal(bad.status, 400);
   const noProof = await request('POST', '/api/provider/apply', { config: cfg, expectedRevision: 0, token: 'UI-ONLY-NOT-A-REAL-PROOF' }, cookie);
   assert.equal(noProof.status, 400); assert.equal(JSON.parse(noProof.text).message, 'PROVIDER_PREVIEW_REQUIRED');
@@ -66,6 +68,17 @@ async function main () {
     assert.equal(JSON.parse((await request('GET', '/api/provider/list', null, cookie)).text).data.records.length, 0);
     assert(await applyDisabled());
     assert(!await page.$eval('.provider-page', e => /版本记录|保存草稿|编辑 v\d/.test(e.textContent)));
+    assert(await page.$eval('.provider-page', e => e.textContent.includes('不设小时配额')));
+    assert(!await page.$$eval('.ant-form-item-label', labels => labels.some(e => e.textContent.includes('元数据预算'))));
+    phase = 'personal-rule-editor';
+    await tab('解析规则');
+    assert.equal(await page.$eval('#personal-selector-0', e => e.value), 'td[title="Seeding"]');
+    assert(await page.$eval('.ant-tabs-tabpane-active', e => e.textContent.includes('不会永久拒绝')));
+    await clickText('新增个人状态规则');
+    assert.equal(await page.$eval('#personal-selector-2', e => e.value), '[title]');
+    await page.click('[aria-label="移除个人状态 3"]');
+    assert.equal(await page.$('#personal-selector-2'), null);
+    await tab('基础设置');
     phase = 'unsaved-guards';
     await setIntervalField('600');
     await clickText('结束编辑');
@@ -117,7 +130,7 @@ async function main () {
               eligible: 1,
               candidates: [
                 { candidateKey: 'NANYANG:1', name: '隔离预览 · 已确认免费 / 双倍上传', size: 64 * 1024 ** 3, seeders: 8, leechers: 24, downloadFactor: 0, uploadFactor: 2, hrState: 'unknown', reasons: [] },
-                { candidateKey: 'NANYANG:2', name: '隔离预览 · 字段未知', size: null, seeders: null, leechers: 0, downloadFactor: null, uploadFactor: null, hrState: 'unknown', reasons: ['missing-fields'] }
+                { candidateKey: 'NANYANG:2', name: '隔离预览 · 站内已在做种', size: null, seeders: null, leechers: 0, downloadFactor: null, uploadFactor: null, hrState: 'unknown', personalState: 'seeding', reasons: ['missing-fields', 'personal-active'] }
               ]
             }
           };
@@ -140,6 +153,7 @@ async function main () {
     await clickText('请求一页预览').catch(async () => { await clickText('预览'); });
     await page.waitForSelector('.provider-preview-summary'); assert(!await applyDisabled());
     assert(await page.$eval('.ant-tabs-tabpane-active', e => e.textContent.includes('未知') && e.textContent.includes('来源筛选通过 1 条')));
+    assert(await page.$eval('.ant-tabs-tabpane-active', e => e.textContent.includes('正在做种') && e.textContent.includes('站内当前账号正在下载／做种')));
     previewMode = 'error'; await clickText('重新预览');
     await page.waitForFunction(() => document.body.textContent.includes('登录验证失败'));
     assert(await applyDisabled()); assert.equal(await page.$('.provider-preview-summary'), null);
@@ -265,13 +279,15 @@ async function main () {
     assert.equal(activation.status, 400); assert.equal(JSON.parse(activation.text).message, 'PROVIDER_PREVIEW_REQUIRED');
     assert(!await page.$eval('.provider-page', e => /版本记录|保存草稿|编辑 v\d/.test(e.textContent)));
     phase = 'legacy-timeouts-not-injected';
-    const oldConfig = JSON.parse(JSON.stringify(cfg)); delete oldConfig.listTimeouts;
+    const oldConfig = JSON.parse(JSON.stringify(cfg)); delete oldConfig.listTimeouts; delete oldConfig.personalStateRules;
+    oldConfig.budgets.metadataPerHour = 24; // Readable but never shown as an active limit.
     await fixtureStore.apply(oldConfig, (await fixtureStore.read(cfg.rssId)).revision, async () => {});
     const oldBytes = fs.readFileSync('/vertex/data/providers/' + cfg.rssId + '.json', 'utf8');
     await clickText('刷新'); await page.waitForFunction(() => document.body.textContent.includes('配置已被其他操作修改'));
     await clickText('结束编辑'); await page.waitForSelector('#provider-rss');
     await page.click('button[aria-label="编辑 隔离采集示例"]'); await page.waitForSelector('#provider-interval');
     assert.equal(await page.$('#provider-readSeconds'), null);
+    assert.equal(await page.$('#personal-selector-0'), null);
     assert(!await page.$eval('.provider-summary', e => e.textContent.includes('有未保存修改')));
     assert.equal(fs.readFileSync('/vertex/data/providers/' + cfg.rssId + '.json', 'utf8'), oldBytes);
     assert(await applyDisabled());

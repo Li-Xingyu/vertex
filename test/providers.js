@@ -40,7 +40,7 @@ async function main () {
     c.mapping.fields.id.path = 'constructor.prototype'; assert.throws(() => validate(c, profiles));
   });
   await test('bounded intervals pages budgets and JSON paths', () => {
-    for (const edit of [c => { c.pages = 4; }, c => { c.intervalSeconds = 0; }, c => { c.budgets.metadataPerHour = 999; }, c => { c.params.passkey = 'forbidden'; }]) { const c = config(); edit(c); assert.throws(() => validate(c, profiles)); }
+    for (const edit of [c => { c.pages = 4; }, c => { c.intervalSeconds = 0; }, c => { c.budgets.listPerHour = 999; }, c => { c.params.passkey = 'forbidden'; }]) { const c = config(); edit(c); assert.throws(() => validate(c, profiles)); }
   });
   await test('HTML timeout configuration is optional bounded and never applies to MT', () => {
     const c = config(); const old = { ...c }; delete old.listTimeouts;

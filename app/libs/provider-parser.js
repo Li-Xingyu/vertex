@@ -1,6 +1,7 @@
 'use strict';
 const { JSDOM } = require('jsdom');
 const { fail } = require('./provider-schema');
+const personal = require('./provider-personal');
 function valueAt (obj, path) {
   return (path || '').split('.').reduce((x, k) => x && Object.prototype.hasOwnProperty.call(x, k) ? x[k] : undefined, obj);
 }
@@ -102,6 +103,7 @@ function parse (body, config, profile, now = Date.now() / 1000) {
         leechers: number(raw.leechers),
         pubTime: epoch(raw.publishedAt, config.mapping.timezoneOffset),
         fetchedAt: now,
+        personalState: personal.read(root, config.personalStateRules, json, valueAt),
         downloadFactor: consistent(promos.map(r => r.downloadFactor)),
         uploadFactor: consistent(promos.map(r => r.uploadFactor)),
         downloadUntil: epoch(raw.downloadUntil, config.mapping.timezoneOffset),
@@ -128,6 +130,7 @@ function parse (body, config, profile, now = Date.now() / 1000) {
       }
       const old = candidates.get(c.candidateKey);
       if (old) {
+        personal.merge(old, c);
         // Duplicate pinned rows are common. Never choose the more favourable
         // side of contradictory safety metadata.
         if (['downloadFactor', 'uploadFactor', 'hrState', 'downloadUntil', 'uploadUntil', 'downloadUnlimited', 'uploadUnlimited', 'size'].some(k => old[k] !== c[k])) {

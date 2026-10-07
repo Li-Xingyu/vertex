@@ -138,8 +138,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -207,8 +206,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -275,8 +273,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -344,8 +341,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": ".torrent_item",
@@ -409,8 +405,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -478,8 +473,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -547,8 +541,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -616,8 +609,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": "table.torrents > tbody > tr",
@@ -701,8 +693,7 @@
     },
     "budgetCaps": {
       "listPerHour": 36,
-      "detailPerHour": 70,
-      "metadataPerHour": 24
+      "detailPerHour": 70
     },
     "mapping": {
       "rows": ".torrent-table-sub-info",
@@ -773,7 +764,7 @@
     "budgetCaps": {
       "listPerHour": 24,
       "detailPerHour": 70,
-      "metadataPerHour": 24
+      "personalPerHour": 24
     },
     "mapping": {
       "rows": "data",
