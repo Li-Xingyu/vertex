@@ -5,7 +5,18 @@ const I = require('./identity');
 const G = require('./index');
 const MODE = 'exact-v1';
 const MAX_AGE = 660;
-const raw = row => row.originProp || row;
+function raw (row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) throw Error('CG_RECLAIM_ROW');
+  const hash = I.hash(row.hash);
+  if (row.originProp === undefined) return row;
+  const origin = row.originProp;
+  if (!origin || typeof origin !== 'object' || Array.isArray(origin)) throw Error('CG_RECLAIM_ROW');
+  // sync/maindata stores the hash in its object key. Vertex lifts that key to
+  // row.hash, while originProp contains only the value. Preserve this identity
+  // without mutating either snapshot, and never hide conflicting identities.
+  if (origin.hash !== undefined && I.hash(origin.hash) !== hash) throw Error('CG_RECLAIM_HASH_CONFLICT');
+  return { ...origin, hash };
+}
 const fresh = (at, now) => Number.isSafeInteger(at) && at > 0 && now >= at && now - at <= MAX_AGE;
 const same = (a, b) => I.digest(a) === I.digest(b);
 const groupKey = group => 'cg1:' + group.id + ':' + group.revision;
@@ -64,9 +75,13 @@ function context (rows, state, now) {
   const proof = state.exactGroups;
   if (!proof || proof.schema !== 1 || proof.mode !== MODE || !fresh(proof.at, now) ||
       !Array.isArray(proof.groups) || proof.groups.length > 10000) return result;
-  const current = new Map(rows.map(t => [raw(t).hash, t]));
-  if (current.size !== rows.length) return result;
-  const scopes = I.deleteScopes(rows.map(raw));
+  let current; let scopes;
+  try {
+    const normalized = rows.map(raw);
+    current = new Map(normalized.map((r, i) => [r.hash, rows[i]]));
+    if (current.size !== rows.length) return result;
+    scopes = I.deleteScopes(normalized);
+  } catch (_) { return result; }
   const drain = drains.get(state); const assigned = new Set();
   for (const g of proof.groups) {
     if (!g || !Array.isArray(g.members) || !g.members.length || !Array.isArray(g.paths) || g.paths.length !== 1 ||
@@ -96,8 +111,10 @@ function context (rows, state, now) {
 }
 
 function structure (rows, row, state, now) {
-  const entry = context(rows, state, now).byHash.get(raw(row).hash);
-  return entry || { key: null, group: [], valid: false };
+  try {
+    const entry = context(rows, state, now).byHash.get(raw(row).hash);
+    return entry || { key: null, group: [], valid: false };
+  } catch (_) { return { key: null, group: [], valid: false }; }
 }
 
 function validateManifest (entry, row, files, clientId) {

@@ -1,6 +1,7 @@
 'use strict';
 // Local synthetic tests only. No NAS connection, file payload or real qB calls.
 const assert = require('assert').strict; const path = require('path'); const Module = require('module'); const http = require('http'); const EventEmitter = require('events');
+const fs = require('fs'); const vm = require('vm');
 const native = path.join(__dirname, '../app/libs/content-groups');
 const I = require(path.join(native, 'identity')); const E = require(path.join(native, 'reclaim'));
 const realLoad = Module._load; const realGet = http.get;
@@ -102,7 +103,162 @@ http.get = (u, options, cb) => {
 P.loadState = () => clone(state);
 async function test (name, fn) { await fn(); passed++; console.log('PASS ' + name); }
 const eligible = () => P.decision(rows, rows[0], state, now).allCleanup;
+// Exercise the real sync/maindata adapter: qB puts the hash in the object key,
+// not in its value. Do not manufacture originProp with an already copied hash.
+async function normalized (source = rows) {
+  const holder = { exports: {} }; const body = JSON.stringify({
+    server_state: {},
+    torrents: Object.fromEntries(source.map(({ hash, ...props }) => [hash, props]))
+  });
+  const sandbox = {
+    module: holder,
+    exports: holder.exports,
+    require (key) {
+      if (key === '../util') {
+        return {
+          requestPromise: async options => {
+            assert.equal(options.url, 'http://fixture.invalid/api/v2/sync/maindata');
+            return { body };
+          }
+        };
+      }
+      if (key === '../logger') return {};
+      if (['url', 'fs'].includes(key)) return require(key);
+      throw Error('Unexpected adapter dependency');
+    }
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../app/libs/client/qb.js'), 'utf8'), sandbox);
+  const data = clone(await holder.exports.getMaindata('http://fixture.invalid', 'synthetic'));
+  assert(data.torrents.every(t => t.hash && !Object.hasOwnProperty.call(t.originProp, 'hash')));
+  return data.torrents;
+}
+function nativeClient (base, torrents, clock) {
+  const holder = { exports: {} }; const sandbox = {
+    module: holder,
+    require (key) {
+      if (key === 'fixture-policy') return P;
+      if (key === 'fixture-clock') return clock;
+      if (key === '../libs/util') return { sleep: async () => {}, runRecord: async (...args) => records.push(args) };
+      if (key === '../libs/logger') return { info () {}, debug () {}, error (...args) { throw Error('Native rule error: ' + args.length); } };
+      if (key === 'moment') return () => ({ unix: () => clock.seconds, format: () => 'fixture' });
+      return {};
+    }
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../app/common/Client.js'), 'utf8'), sandbox);
+  const rule = {
+    id: D.RID,
+    type: 'javascript',
+    alias: 'fixture',
+    fitTime: '600',
+    deleteNum: 1,
+    code: '(maindata,torrent)=>require("fixture-policy").decision(maindata.torrents,torrent,require("fixture-policy").loadState(),require("fixture-clock").seconds).allCleanup'
+  };
+  return Object.assign(Object.create(holder.exports.prototype), base, {
+    maindata: { torrents },
+    fitTime: { [D.RID]: {} },
+    deleteRules: [rule],
+    rejectDeleteRules: [],
+    pausedTorrentHashes: [],
+    reannounceTorrent: async () => {}
+  });
+}
 async function run () {
+  await test('real qB adapter rows preserve exact grouping and preparation without input mutation', async () => {
+    const items = [task(0), task(1)]; fixture(items); const live = await normalized(); const before = JSON.stringify(live);
+    const exact = E.prepare(snapshot(items), live, clientId, now);
+    assert.deepEqual(exact, state.exactGroups);
+    const entry = E.structure(live, live[0], state, now);
+    assert(entry.bound && entry.valid); assert.equal(entry.group.length, 2); assert(entry.group.every(t => live.includes(t)));
+    assert(P.decision(live, live[0], state, now).allCleanup); assert.equal(JSON.stringify(live), before);
+  });
+  await test('one normalized task also binds rather than relying on duplicate-key rejection', async () => {
+    fixture([task(0)]); const live = await normalized(); assert(E.structure(live, live[0], state, now).valid);
+    assert(P.decision(live, live[0], state, now).allCleanup);
+  });
+  await test('raw normalized and guard-style matching-hash rows are equivalent', async () => {
+    fixture(); const live = await normalized(); live[1].originProp.hash = live[1].hash;
+    for (const input of [live, [rows[0], live[1]], rows]) {
+      const entry = E.structure(input, input[0], state, now); assert(entry.valid);
+      assert(E.validateManifest(entry, input[0], manifests[input[0].hash], clientId));
+      assert(E.permit(entry, state.audits[entry.key]));
+    }
+  });
+  await test('missing invalid conflicting and duplicate identities fail closed for the entire snapshot', async () => {
+    const items = [task(0), task(1)]; fixture(items);
+    const mutations = [
+      live => { delete live[0].hash; },
+      live => { live[0].hash = ''; },
+      live => { live[0].hash = 'invalid'; },
+      live => { live[0].originProp.hash = 'f'.repeat(40); },
+      live => { live[0].originProp.hash = null; },
+      live => { live[0].originProp.hash = ''; },
+      live => { live[0].hash = live[1].hash; },
+      live => { live[0].originProp = []; },
+      live => { live[0].originProp = null; }
+    ];
+    for (const mutate of mutations) {
+      const live = await normalized(); mutate(live);
+      assert.equal(E.context(live, state, now).groups.length, 0);
+      assert(!E.structure(live, live[1], state, now).valid);
+      assert.throws(() => E.prepare(snapshot(items), live, clientId, now));
+    }
+  });
+  await test('normalized identity conflict cannot validate a manifest or grant a drain capability', async () => {
+    fixture(); const live = await normalized(); const entry = E.structure(live, live[0], state, now);
+    const bad = clone(live[0]); bad.originProp.hash = 'f'.repeat(40);
+    assert(!E.validateManifest(entry, bad, manifests[live[0].hash], clientId));
+    assert(!E.structure(live, bad, state, now).valid);
+    assert.throws(() => E.draining(state, entry.key, [bad]));
+  });
+  await test('normalized unknown sibling still protects the physical delete scope', async () => {
+    fixture(); rows.push({ ...rows[0], hash: 'f'.repeat(40) }); const live = await normalized();
+    assert(!E.structure(live, live[0], state, now).valid); assert(!P.decision(live, live[0], state, now).allCleanup);
+  });
+  await test('normalized readded path size and checking changes cannot inherit the old binding', async () => {
+    for (const mutate of [r => r.added_on++, r => { r.save_path = '/elsewhere'; }, r => { r.content_path += '/changed'; }, r => r.total_size++, r => { r.state = 'checkingUP'; }]) {
+      fixture(); mutate(rows[0]); const live = await normalized(); assert(!E.structure(live, live[0], state, now).valid);
+    }
+  });
+  await test('normalized history and removed-member upload match raw evidence', async () => {
+    fixture(); const live = await normalized();
+    assert.deepEqual(P.observe(state.history, live, now + 300, state), P.observe(state.history, rows, now + 300, state));
+    const key = state.exactGroups.groups[0].key; const rawDrain = E.draining(state, key, [rows[0]]); const normalizedDrain = E.draining(state, key, [live[0]]);
+    assert.deepEqual(E.removedRows(normalizedDrain), E.removedRows(rawDrain));
+    assert(P.decision(live.slice(1), live[1], normalizedDrain, now).allCleanup);
+    assert(!P.decision(live.slice(1), live[1], clone(normalizedDrain), now).allCleanup);
+  });
+  await test('normalized rows preserve HR yield near-complete and stale-evidence protection', async () => {
+    const mutations = [
+      () => { rows[1].tracker = 'https://tracker.carpt.net/announce'; state.audits[state.exactGroups.groups[0].key].trackers[rows[1].hash] = ['tracker.carpt.net']; },
+      () => { rows[1].upspeed = 200000; },
+      () => { rows[1].uploaded = 128 * 1024 ** 2; },
+      () => { rows[0].progress = 0.95; rows[0].state = 'downloading'; },
+      () => { state.history = {}; },
+      () => { state.time -= 661; },
+      () => { state.fenceReady = false; },
+      () => { state.exactGroups.groups[0].checkedAt -= 661; }
+    ];
+    for (const mutate of mutations) { fixture(); mutate(); const live = await normalized(); assert(!P.decision(live, live[0], state, now).allCleanup); }
+  });
+  await test('actual native fit timer and guard drain normalized inputs only after 600 seconds', async () => {
+    const base = fixture(); const clock = { seconds: now }; const c = nativeClient(base, await normalized(), clock); D.install(c);
+    const rule = c.deleteRules[0]; c.flashFitTime(rule);
+    assert.equal(Object.keys(c.fitTime[D.RID]).length, 2);
+    assert(Object.values(c.fitTime[D.RID]).every(t => t === now));
+    await c.autoDelete(); assert.equal(calls.length, 0);
+    clock.seconds = now + 600; c.flashFitTime(rule); await c.autoDelete(); assert.equal(calls.length, 0);
+    clock.seconds++; await c.autoDelete(); assert.deepEqual(calls.map(x => x.deleteFiles), [false, true]);
+    assert.equal(rows.length, 0); assert.equal(c.codexGroupGuardStats.groupsDeleted, 1);
+    assert.equal(c.codexGroupGuardStats.filesDeleted, 1); assert.equal(c.codexGroupGuardStats.recordErrors, 0);
+  });
+  await test('native fit timer resets if normalized identity or live yield stops matching', async () => {
+    for (const mutate of [t => { t.originProp.hash = 'f'.repeat(40); }, t => { t.uploaded = 128 * 1024 ** 2; }]) {
+      const base = fixture(); const clock = { seconds: now }; const c = nativeClient(base, await normalized(), clock); const rule = c.deleteRules[0];
+      c.flashFitTime(rule); assert.equal(Object.keys(c.fitTime[D.RID]).length, 2);
+      mutate(c.maindata.torrents[0]); clock.seconds += 5; c.flashFitTime(rule); assert.equal(Object.keys(c.fitTime[D.RID]).length, 0);
+      await c.autoDelete(); assert.equal(calls.length, 0);
+    }
+  });
   await test('exact cross-site identity groups names independently of qB display labels', () => {
     fixture(); rows[1].name = 'renamed display label'; assert(eligible()); assert.equal(P.structural(rows, rows[0], now, state).group.length, 2);
   });
