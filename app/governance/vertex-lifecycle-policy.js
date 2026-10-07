@@ -193,9 +193,13 @@ function hostsFor(t,state) {
 // Connected peers can hold identical pieces and request nothing. Relax ONLY
 // pure HH groups with exact no-HR proofs; every real audited host must still be
 // HH. Mixed-site groups retain the original zero-peer requirement.
-function hhIdlePeers(group,state,history,now) {
+function hhIdlePeers(group,state,history,now,key) {
+  // The caller already resolved identity against the COMPLETE qB snapshot.
+  // Re-indexing a subgroup here builds the whole proof set once per group,
+  // blocks the event loop, and loses outside-reference context. Never do it.
+  if(exactMode(state)&&typeof key!=='string')return false;
   if(!group.length||!group.every(x=>{
-    const audited=state.audits?.[groupKey(group,x,state,now)]?.trackers?.[x.hash],hs=audited||hostsFor(x,state);
+    const audited=state.audits?.[key??digest(cp(x))]?.trackers?.[x.hash],hs=audited||hostsFor(x,state);
     return hs.length>0&&hs.every(h=>h==='tracker.hhanclub.net'&&hostNoHr(x,h))&&
       Number.isFinite(number(x,'leecher','num_leechs'))&&number(x,'leecher','num_leechs')>=0;
   }))return false;
@@ -208,7 +212,7 @@ function hhIdlePeers(group,state,history,now) {
 function legacyLowYield(rows,t,state,now=Date.now()/1000,refreshOnly=false) {
   if(!fresh(state,now))return false;
   const p=structural(rows,t,now,state,refreshOnly),key=p.key,h=state.history?.[key];
-  const hhIdle=hhIdlePeers(p.group,state,h,now);
+  const hhIdle=hhIdlePeers(p.group,state,h,now,key);
   if(!safePath(p.path)||p.overlap||!p.group.length||!p.group.every(x=>
     managed(x)&&hrMet(x,hostsFor(x,state))&&sameContent(x,t,state)&&
     (number(x,'leecher','num_leechs')===0||hhIdle)&&number(x,'uploadSpeed','upspeed')>=0&&

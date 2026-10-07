@@ -76,16 +76,21 @@ function writeState(state) {
 function request(url,method='GET',body='',cookie='',deadlineMs=null) {
   return new Promise((resolve,reject)=>{
     const u=new URL(url);if(u.protocol!=='http:' || !['127.0.0.1','192.168.1.188'].includes(u.hostname) || !['8088','8089'].includes(u.port))return reject(new Error('destination'));
-    let timer;
-    const req=http.request(u,{method,headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','Content-Length':Buffer.byteLength(body)}},r=>{
+    let timer,settled=false;
+    const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);if(error)reject(error);else resolve(value);};
+    // This low-frequency local audit can do synchronous work between GETs.
+    // Do not reuse a socket whose idle-close events have not been processed.
+    // No global Agent changes or retries (especially for mutation requests).
+    const req=http.request(u,{method,agent:false,headers:{Cookie:cookie,'Content-Type':'application/x-www-form-urlencoded','Content-Length':Buffer.byteLength(body)}},r=>{
       let bytes=0,chunks=[];r.on('data',b=>{bytes+=b.length;if(bytes>32*1024*1024)req.destroy(new Error('response_size'));else chunks.push(b);});
-      r.on('end',()=>{clearTimeout(timer);resolve({status:r.statusCode,headers:r.headers,body:Buffer.concat(chunks).toString()});});
-    });req.setTimeout(12000,()=>req.destroy(new Error('timeout')));req.on('error',e=>{clearTimeout(timer);reject(e);});
+      r.on('error',e=>finish(e));r.on('aborted',()=>finish(new Error('response_aborted')));
+      r.on('end',()=>{if(r.complete===false)return finish(new Error('response_incomplete'));finish(null,{status:r.statusCode,headers:r.headers,body:Buffer.concat(chunks).toString()});});
+    });req.setTimeout(12000,()=>req.destroy(new Error('timeout')));req.on('error',e=>finish(e));
     if(deadlineMs!==null)timer=setTimeout(()=>req.destroy(new Error('timeout')),deadlineMs);
     if(body)req.write(body);req.end();
   });
 }
-async function json(url,cookie='',deadlineMs=null) {const r=await request(url,'GET','',cookie,deadlineMs);if(r.status!==200)throw new Error('qbit_http');return JSON.parse(r.body);}
+async function json(url,cookie='',deadlineMs=null) {const r=await request(url,'GET','',cookie,deadlineMs);if(r.status!==200)throw new Error('qbit_http');try{return JSON.parse(r.body);}catch(_){throw Error('invalid_json');}}
 function peerInterestProof(snapshot,leechers){
   if(snapshot?.full_update!==true||!snapshot.peers||Array.isArray(snapshot.peers)||typeof snapshot.peers!=='object'||
     !Number.isInteger(leechers)||leechers<0)throw Error('peer_shape');
@@ -266,18 +271,23 @@ async function run() {
   for(const {key,group,partial,fast,all} of candidates.slice(0,4)) {
     pending[key]=now;
     const manifests={},trackers={},exact=P.exactMode(state),E=exact?P.exactEngine():null;
+    let stage='manifest_get';
     try {
       for(const t of group) {
+        stage='manifest_get';
         const files=await json(base+'/api/v2/torrents/files?hash='+encodeURIComponent(t.hash),cookie);
+        stage='manifest_identity';
         if(!Array.isArray(files))throw new Error('manifest_shape');
         if(exact&&!E.validateManifest(E.structure(rows,t,state,now),t,files,'3dfcd430'))throw Error('identity_manifest_changed');
         manifests[t.hash]=files.map(f=>({name:f.name,size:f.size})).sort((a,b)=>a.name.localeCompare(b.name));
-        const list=await json(base+'/api/v2/torrents/trackers?hash='+encodeURIComponent(t.hash),cookie);
+        stage='trackers_get';const list=await json(base+'/api/v2/torrents/trackers?hash='+encodeURIComponent(t.hash),cookie);
+        stage='trackers_parse';
         trackers[t.hash]=[...new Set(list.filter(x=>/^https?:\/\/|^udp:\/\//.test(x.url)).map(x=>new URL(x.url).hostname.toLowerCase()))];
       }
-      const audit=fileAudit(group,manifests,trackers,partial);audit.time=now;audit.partial=partial;state.audits[key]=audit;
+      stage='file_audit';const audit=fileAudit(group,manifests,trackers,partial);audit.time=now;audit.partial=partial;state.audits[key]=audit;
+      stage='post_audit_identity';
       if(exact){const identity=E.structure(rows,group[0],state,now);audit.groupKey=key;audit.groupRevision=identity.revision;}
-      if(audit.ok&&all&&!P.legacyLowYield(rows,group[0],state,now)){
+      stage='post_audit_yield';if(audit.ok&&all&&!P.legacyLowYield(rows,group[0],state,now)){
         if(!P.noHrYieldCandidate(rows,group[0],state,now)){audit.ok=false;audit.reason='yield_protected';}
         else{
           try{
@@ -288,8 +298,8 @@ async function run() {
           }catch(_){audit.ok=false;audit.reason='peer_unavailable';}
         }
       }
-      if(audit.ok){state.summary.auditedGroups++;if(fast)state.summary.mtFastAudited++;if(all)state.summary.allSiteAudited++;if(P.quiet(state.history[key],audit.allocated,state.pressure,now))state.summary.quietGroups++;}
-    }catch(e){state.audits[key]={ok:false,time:now,reason:'audit_failed',detail:auditFailure(e)};}
+      stage='summary';if(audit.ok){state.summary.auditedGroups++;if(fast)state.summary.mtFastAudited++;if(all)state.summary.allSiteAudited++;if(P.quiet(state.history[key],audit.allocated,state.pressure,now))state.summary.quietGroups++;}
+    }catch(e){state.audits[key]={ok:false,time:now,reason:'audit_failed',detail:auditFailure(e),stage};}
   }
   state.summary.peerRequests=peerBudget.requests;
   state.auditAttempt=Object.fromEntries(candidates.map(x=>[x.key,pending[x.key]||0]));
@@ -323,7 +333,9 @@ function auditedBytes(state,key){const a=state.audits?.[key];return a?.ok===true
 function auditFailure(e){
   // Never persist raw errors: they can contain authenticated URLs/file paths.
   const allowed=new Set(['identity_manifest_changed','manifest_shape','qbit_http','timeout','response_size','destination',
-    'file_budget','symlink','unmanaged_file','file_type','ENOENT','EACCES','EIO']);
+    'file_budget','symlink','unmanaged_file','file_type','ENOENT','EACCES','EIO',
+    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE','ENETUNREACH','EHOSTUNREACH',
+    'response_aborted','response_incomplete','invalid_json']);
   if(allowed.has(e?.message))return e.message;
   if(allowed.has(e?.code))return e.code;
   return 'unclassified';

@@ -44,6 +44,8 @@ jobs:
         run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/content-group-delete-history.js
       - name: Exact content groups with existing reclamation guard
         run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/content-groups-governance.js
+      - name: Governance idle connection and bounded transport regressions
+        run: docker run --rm --network none --read-only --entrypoint node "$IMAGE:$TAG" test/governance-http.js
       - name: Lint changed application modules
         run: docker run --rm --network none --read-only --entrypoint ./node_modules/.bin/eslint "$IMAGE:$TAG" app/libs/database.js app/libs/database-worker.js app/libs/rss-admission.js app/libs/util.js app/libs/client/qb.js app/libs/provider-*.js app/libs/content-groups app/libs/torrent-providers.js app/controller/Provider.js app/common/Client.js app/common/Rss.js app/model/ClientMod.js test
       - name: Fresh isolated application startup

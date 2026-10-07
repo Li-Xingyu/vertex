@@ -164,6 +164,51 @@ function nativeClient (base, torrents, clock) {
   });
 }
 async function run () {
+  await test('yield sweeps reuse the complete snapshot instead of re-indexing each subgroup', () => {
+    fixture(Array.from({ length: 120 }, (_, n) => task(n, { content: 'group-' + n })));
+    const structure = E.structure; let inspected = 0; let builds = 0;
+    const groups = state.exactGroups.groups; const iterator = groups[Symbol.iterator];
+    groups[Symbol.iterator] = function () { builds++; return iterator.call(this); };
+    E.structure = (input, ...args) => { inspected++; assert.equal(input, rows, 'subgroup indexing must not occur'); return structure(input, ...args); };
+    try {
+      for (const row of rows) { assert(P.groupLowYield(rows, row, state, now)); assert(P.refreshCandidate(rows, row, state, now)); }
+      assert(inspected >= rows.length); assert.equal(builds, 1, 'one complete context per snapshot/state/tick');
+      assert.equal(P.hhIdlePeers(rows.slice(0, 1), state, null, now), false, 'missing exact key must fail closed');
+    } finally { E.structure = structure; delete groups[Symbol.iterator]; }
+  });
+  await test('resolved HH key preserves audited tracker HR and partial-demand protections', () => {
+    const items = [task(0), task(1)]; items.forEach(i => { i.row.tracker = 'https://tracker.hhanclub.net/announce'; i.row.num_leechs = 1; }); fixture(items);
+    const key = state.exactGroups.groups[0].key; const proof = {
+      version: 1,
+      entries: Object.fromEntries(rows.map(r => [r.hash,
+        { hr: false, rssId: '57d6ce6e', size: r.size, addedOn: r.added_on, time: now - 60 }]))
+    };
+    const holder = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, bundle, 'vertex-lifecycle-policy.js'), 'utf8'), {
+      module: holder,
+      __dirname: '/synthetic',
+      URL,
+      Date,
+      require (name) {
+        if (name === './hhan-provider-lifecycle') return { revoked: () => false };
+        if (name === 'fs') return { statSync: () => ({ size: 1024 }), readFileSync: () => JSON.stringify(proof) };
+        if (name === './content-groups/reclaim') return E;
+        if (['crypto', 'path'].includes(name)) return require(name);
+        throw Error('Unexpected proof dependency');
+      }
+    });
+    const policy = holder.exports;
+    state.audits[key].trackers = Object.fromEntries(rows.map(r => [r.hash, ['tracker.hhanclub.net']]));
+    assert(policy.legacyLowYield(rows, rows[0], state, now));
+    state.audits[key].trackers[rows[1].hash].push('tracker.carpt.net');
+    assert(!policy.legacyLowYield(rows, rows[0], state, now));
+    state.audits[key].trackers[rows[1].hash] = ['tracker.hhanclub.net'];
+    rows[0].progress = 0.5; rows[0].state = 'downloading'; rows[0].num_seeds = 1;
+    assert(!policy.legacyLowYield(rows, rows[0], state, now));
+    rows[0].num_seeds = 0; assert(policy.legacyLowYield(rows, rows[0], state, now));
+    rows[0].dlspeed = 100; assert(!policy.legacyLowYield(rows, rows[0], state, now));
+    assert(!P.legacyLowYield(rows, rows[0], state, now), 'missing no-HR proof remains protected');
+  });
   await test('expired evidence can nominate refresh but never fit or authorize deletion', () => {
     const items = [task(0), task(1)]; items.forEach(t => { t.checkedAt = now - 700; }); fixture(items);
     assert(P.refreshCandidate(rows, rows[0], state, now)); assert(!eligible());
@@ -413,6 +458,80 @@ async function run () {
       mutate(c.maindata.torrents[0]); clock.seconds += 5; c.flashFitTime(rule); assert.equal(Object.keys(c.fitTime[D.RID]).length, 0);
       await c.autoDelete(); assert.equal(calls.length, 0);
     }
+  });
+  await test('native scheduler bypasses one failing content group without consuming the success slot', async () => {
+    const items = [task(0, { content: 'bad' }), task(1, { content: 'bad' }), task(2, { content: 'good' })];
+    const base = fixture(items); const c = nativeClient(base, await normalized(), { seconds: now + 601 }); D.install(c);
+    for (const t of c.maindata.torrents) c.fitTime[D.RID][t.hash] = now;
+    filesHook = h => manifests[h].map(f => ({ ...f, priority: h === items[2].row.hash ? 1 : 0 }));
+    await c.autoDelete();
+    assert.deepEqual(calls.map(x => x.hash), [items[2].row.hash]);
+    assert.equal(c.codexGroupGuardStats.blocked, 1); assert.equal(c.codexGroupGuardStats.groupsDeleted, 1);
+    assert.equal(c.codexGroupGuardStats.lastBlock.detail, 'selective_download');
+    assert.equal(c.codexGroupGuardStats.lastBlock.stopRound, false);
+    assert.equal(c.codexGroupGuardCooldowns.size, 1); assert.equal(rows.length, 2);
+    assert.equal(records.length, 2);
+  });
+  await test('local cooldown suppresses repeated siblings and grows to a bounded five minutes', async () => {
+    const c = fixture(); D.install(c); const t = rows[0]; const key = state.exactGroups.groups[0].key;
+    filesHook = h => manifests[h].map(f => ({ ...f, priority: 0 }));
+    for (const seconds of [60, 120, 240, 300]) {
+      const round = c.groupDeleteScheduler.begin(); const prepared = c.groupDeleteScheduler.prepare(rows, t, round);
+      assert.equal(prepared.status, 'ready'); const result = await c.groupDeleteScheduler.attempt(t, { id: D.RID }, round, prepared);
+      assert.equal(result.stopRound, false); assert.equal(c.groupDeleteScheduler.prepare(rows, rows[1], round).status, 'skip');
+      const cool = c.codexGroupGuardCooldowns.get(key); assert(cool.until - cool.at === seconds * 1000);
+      assert.equal(c.groupDeleteScheduler.prepare(rows, t, c.groupDeleteScheduler.begin()).status, 'skip'); cool.until = 0;
+    }
+    assert.equal(calls.length, 0); assert.equal(records.length, 0);
+    D.install(c, true); assert.equal(c.codexGroupGuardCooldowns.get(key).failures, 4);
+  });
+  await test('changed membership has a new revision and cannot inherit old-group cooldown or permission', () => {
+    const first = task(0); const c = fixture([first]); D.install(c); const oldKey = state.exactGroups.groups[0].key;
+    c.codexGroupGuardCooldowns.set(oldKey, { failures: 1, until: Date.now() + 60000, at: Date.now() });
+    fixture([first, task(1)]); const round = c.groupDeleteScheduler.begin(); const p = c.groupDeleteScheduler.prepare(rows, rows[0], round);
+    assert.equal(p.status, 'ready'); assert.notEqual(p.key, oldKey);
+  });
+  await test('round attempts are capped at three distinct groups even when every manifest fails', async () => {
+    const base = fixture(Array.from({ length: 5 }, (_, n) => task(n, { content: 'item-' + n })));
+    const c = nativeClient(base, await normalized(), { seconds: now + 601 }); D.install(c);
+    for (const t of c.maindata.torrents) c.fitTime[D.RID][t.hash] = now;
+    filesHook = h => manifests[h].map(f => ({ ...f, priority: 0 }));
+    await c.autoDelete(); assert.equal(c.codexGroupGuardStats.blocked, 3); assert.equal(calls.length, 0);
+  });
+  await test('deadline, forged prepared attempts and global protection failures never fall through to deletion', async () => {
+    const c = fixture(); D.install(c); const s = c.groupDeleteScheduler;
+    const r = s.begin(); r.deadline = Date.now() - 1; assert.equal(s.prepare(rows, rows[0], r).status, 'stop');
+    const r2 = s.begin(); assert.equal((await s.attempt(rows[0], { id: D.RID }, r2, { status: 'ready' })).stopRound, true);
+    for (const mutate of [() => { state.time = now - 661; }, () => { state.fenceReady = false; }, () => { state.otherRootProtected = false; }]) {
+      fixture(); mutate(); assert.equal(s.prepare(rows, rows[0], s.begin()).status, 'stop');
+    }
+    assert.equal(calls.length, 0);
+  });
+  await test('partial removal or unconfirmed mutation ends the round and never grants a retry continuation', async () => {
+    for (const partial of [false, true]) {
+      const c = fixture(); D.install(c); const r = c.groupDeleteScheduler.begin(); const p = c.groupDeleteScheduler.prepare(rows, rows[0], r);
+      if (partial) afterDelete = () => { filesHook = h => manifests[h].map(f => ({ ...f, priority: 0 })); }; else deleteNoOp = true;
+      const result = await c.groupDeleteScheduler.attempt(rows[0], { id: D.RID }, r, p);
+      assert.equal(result.stopRound, true); assert.equal(c.codexGroupGuardCooldowns.size, 0); assert.equal(calls.length, 1);
+    }
+  });
+  await test('manifest diagnostic enums preserve the original boolean checks and contain no raw identity fields', () => {
+    fixture(); const t = rows[0]; const entry = E.structure(rows, t, state, now); const files = manifests[t.hash];
+    assert.deepEqual(E.checkManifest(entry, t, files, clientId), { ok: true, reason: null });
+    const variants = [
+      [{ ...entry, valid: false, invalidReason: 'manifest_stale' }, t, files, 'manifest_stale'],
+      [entry, { ...t, added_on: t.added_on + 1 }, files, 'binding_changed'],
+      [entry, t, files.map(f => ({ ...f, name: 'content/rename.bin' })), 'manifest_digest_changed'],
+      [{ ...entry, identity: { ...entry.identity, files: [] } }, t, files, 'physical_manifest_changed'],
+      [entry, t, files.map(f => ({ ...f, priority: 0 })), 'selective_download'],
+      [entry, t, null, 'manifest_invalid']
+    ];
+    for (const [e, row, fs, reason] of variants) { assert.deepEqual(E.checkManifest(e, row, fs, clientId), { ok: false, reason }); assert(!E.validateManifest(e, row, fs, clientId)); }
+  });
+  await test('guard transport disables idle socket reuse and rejects expired work before sending', async () => {
+    fixture(); const old = http.get; let sent = 0;
+    http.get = (u, options, cb) => { sent++; assert.equal(options.agent, false); return old(u, options, cb); };
+    try { await D.get('http://127.0.0.1:8089', '/api/v2/torrents/info'); await assert.rejects(D.get('http://127.0.0.1:8089', '/api/v2/torrents/info', '', Date.now() - 1), /batch_timeout/); assert.equal(sent, 1); } finally { http.get = old; }
   });
   await test('exact cross-site identity groups names independently of qB display labels', () => {
     fixture(); rows[1].name = 'renamed display label'; assert(eligible()); assert.equal(P.structural(rows, rows[0], now, state).group.length, 2);

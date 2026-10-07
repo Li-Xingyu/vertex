@@ -485,6 +485,11 @@ class Client {
           continue;
         }
       }
+      let groupScheduler = null;
+      if (this.groupDeleteOwnsHistory?.has(rule.id) && this.groupDeleteScheduler?.ruleId === rule.id) {
+        groupScheduler = this.groupDeleteScheduler;
+      }
+      const groupRound = groupScheduler ? groupScheduler.begin() : null;
       for (const torrent of ordered) {
         if (rejectDeleteHash[torrent.hash]) {
           continue;
@@ -502,6 +507,21 @@ class Client {
           continue;
         }
         if (this._fitDeleteRule(rule, torrent)) {
+          if (groupScheduler) {
+            const prepared = groupScheduler.prepare(torrents, torrent, groupRound);
+            if (prepared.status === 'stop') return;
+            if (prepared.status !== 'ready') continue;
+            // The guard checks live members/trackers and owns confirmed history.
+            // A local pre-mutation refusal does not consume a successful slot.
+            const result = await groupScheduler.attempt(torrent, rule, groupRound, prepared);
+            if (result.status === 'deleted' && result.removed > 0 && Array.isArray(result.hashes)) {
+              deletedNum += 1;
+              deletedTorrentHash.push(...result.hashes);
+            } else if (result.status !== 'blocked' || result.stopRound !== false) {
+              return;
+            }
+            continue;
+          }
           deletedNum += 1;
           await this.reannounceTorrent(torrent);
           logger.info(torrent.name, '重新汇报完毕, 等待 2s');

@@ -107,7 +107,12 @@ function context (rows, state, now) {
     // Nomination for a read-only refresh is NOT a deletion capability. Stale
     // manifests may be rechecked, but every other structural protection stays.
     const refreshable = bound && !outside && g.reasons.every(r => r === 'stale_manifest');
-    const entry = { key: g.key, revision: g.revision, identity: g, group: group.filter(Boolean), bound, valid, refreshable };
+    let invalidReason = null;
+    if (!bound) invalidReason = 'instance_changed';
+    else if (outside) invalidReason = 'external_reference';
+    else if (!fresh(g.checkedAt, now) || g.reasons.includes('stale_manifest')) invalidReason = 'manifest_stale';
+    else if (g.reasons.length) invalidReason = 'identity_protected';
+    const entry = { key: g.key, revision: g.revision, identity: g, group: group.filter(Boolean), bound, valid, refreshable, invalidReason };
     result.groups.push(entry);
     for (const h of members) result.byHash.set(h, entry);
   }
@@ -121,17 +126,23 @@ function structure (rows, row, state, now) {
   } catch (_) { return { key: null, group: [], valid: false }; }
 }
 
-function validateManifest (entry, row, files, clientId) {
+function checkManifest (entry, row, files, clientId) {
   try {
     const r = raw(row); const g = entry.identity; const manifest = I.manifest(r, files);
-    return entry.valid && same(I.binding(r, clientId), g.bindings[r.hash]) &&
-      manifest.digest === g.manifestDigest && same(manifest.physical, g.files) && files.every(f => f.priority > 0);
-  } catch (_) { return false; }
+    if (!entry.valid || !g) return { ok: false, reason: entry.invalidReason || 'structure_invalid' };
+    if (!same(I.binding(r, clientId), g.bindings[r.hash])) return { ok: false, reason: 'binding_changed' };
+    if (manifest.digest !== g.manifestDigest) return { ok: false, reason: 'manifest_digest_changed' };
+    if (!same(manifest.physical, g.files)) return { ok: false, reason: 'physical_manifest_changed' };
+    if (!files.every(f => f.priority > 0)) return { ok: false, reason: 'selective_download' };
+    return { ok: true, reason: null };
+  } catch (_) { return { ok: false, reason: 'manifest_invalid' }; }
 }
+
+function validateManifest (entry, row, files, clientId) { return checkManifest(entry, row, files, clientId).ok; }
 
 function permit (entry, audit) {
   return entry.valid && audit && Array.isArray(audit.members) && audit.groupKey === entry.key && audit.groupRevision === entry.revision &&
     same([...audit.members].sort(), [...entry.identity.members].sort());
 }
 
-module.exports = { MODE, MAX_AGE, prepare, context, structure, groupKey, validateManifest, permit, draining, removedRows };
+module.exports = { MODE, MAX_AGE, prepare, context, structure, groupKey, validateManifest, checkManifest, permit, draining, removedRows };
