@@ -64,10 +64,11 @@ async function fixture (profile = 'CARPT') {
       list: async (c, opts) => { await opts.charge(); if (f.personalBatch && opts.personalCharge) await opts.personalCharge(); return {}; },
       beforePrepare: async () => { f.before++; return f.allow; },
       validateFinal: async () => { f.finals++; return f.finalAllow; },
-      prepare: async () => { f.fetches++; if (f.onPrepare) await f.onPrepare(); return f.invalid ? Buffer.from('not-a-torrent') : torrentBody(123456 + (f.unique ? f.fetches : 0)); }
+      prepare: async () => { f.fetches++; if (f.onPrepare) await f.onPrepare(); return f.invalid ? Buffer.from('not-a-torrent') : torrentBody(123456 + (f.unique ? f.fetches : 0)); },
+      select: (c, rows) => f.select ? f.select(c, rows) : rows
     });
   };
-  f.cycle = async () => { at += 300001; return (await f.service.begin(rss)).candidates; };
+  f.cycle = async () => { at += 300001; f.client.maindata.providerSnapshotAt = at / 1000; return (await f.service.begin(rss)).candidates; };
   f.prepare = row => f.service.prepare(rss, row, client);
   f.advance = ms => { at += ms; };
   f.budget = () => JSON.parse(fs.readFileSync(path.join(f.service.store.root, 'budget-' + profile + '.json')));
@@ -76,6 +77,40 @@ async function fixture (profile = 'CARPT') {
   return f;
 }
 async function main () {
+  await test('competition defers before metadata or DB and reconsideration uses new swarm counts', async () => {
+    const f = await fixture(); f.cfg.selection.minDemandRatio = 3;
+    await f.service.store.apply(f.cfg, 1, async () => {});
+    assert.equal((await f.cycle()).length, 0); assert.equal(f.dbReads, 0); assert.equal(f.fetches, 0);
+    assert.equal((await f.stats()).competitionSkips, 1);
+    f.rows[0].leechers = 15;
+    assert.equal(await f.prepare((await f.cycle())[0]), true); assert.equal(f.fetches, 1);
+  });
+  await test('bridge ranking cannot inject or reintroduce source-ineligible candidates', async () => {
+    const f = await fixture(); f.cfg.selection.minDemandRatio = 3;
+    await f.service.store.apply(f.cfg, 1, async () => {});
+    f.select = () => f.rows; assert.equal((await f.cycle()).length, 0); assert.equal(f.fetches, 0);
+  });
+  await test('source original investment defers before metadata and completed tasks release it', async () => {
+    const f = await fixture(); const h = 'a'.repeat(40); f.cfg.selection.maxInFlightGiB = 1;
+    f.history = [{ id: 1, hash: h, add_time: 1, size: 1024 ** 3, record_type: 1, record_note: '添加种子' }];
+    f.client.maindata.torrents = [{ hash: h, size: 1024 ** 3, progress: 0.5, state: 'pausedDL' }];
+    await f.service.store.apply(f.cfg, 1, async () => {});
+    for (let i = 0; i < 3; i++) assert.equal(await f.prepare((await f.cycle())[0]), false);
+    assert.equal(f.fetches, 0); assert.equal(f.budget().metadata, 0); assert.equal((await f.stats()).exposureSkips, 1);
+    f.client.maindata.torrents[0].progress = 1;
+    assert.equal(await f.prepare((await f.cycle())[0]), true); assert.equal(f.fetches, 1);
+  });
+  await test('exposure rechecks metadata exact size and final reservation races without hourly quotas', async () => {
+    const f = await fixture(); f.cfg.selection.maxInFlightGiB = 123200 / 1024 ** 3;
+    await f.service.store.apply(f.cfg, 1, async () => {});
+    assert.equal(await f.prepare((await f.cycle())[0]), false); assert.equal(f.fetches, 1); // exact size is larger
+    f.cfg.selection.maxInFlightGiB = 1; await f.service.store.apply(f.cfg, 2, async () => {});
+    const row = (await f.cycle())[0]; assert.equal(await f.prepare(row), true);
+    f.pending = [{ true_hash: 'd'.repeat(40), candidate_hash: 'other', payload: JSON.stringify({ torrent: { hash: 'd'.repeat(40), size: 1024 ** 3, candidateKey: 'CARPT:13' } }) }];
+    await assert.rejects(() => f.service.finalCheck(f.rss, row, f.client), /PROVIDER_OPPORTUNITY_DEFERRED/);
+    f.pending = []; await f.service.finalCheck(f.rss, row, f.client);
+    f.advance(121000); await assert.rejects(() => f.service.finalCheck(f.rss, row, f.client), /PROVIDER_OPPORTUNITY_DEFERRED/);
+  });
   await test('positive site state skips before DB, identity cache, driver detail or metadata', async () => {
     const f = await fixture();
     for (const personalState of ['seeding', 'downloading']) {

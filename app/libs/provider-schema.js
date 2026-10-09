@@ -82,11 +82,15 @@ function validate (c, profiles) {
     if (p.adapter === 'mteam-api' || !Array.isArray(selectors) || selectors.length < 1 || selectors.length > 8 ||
       selectors.some(s => !str(s, 256) || !s.trim()) || !c.hrRules.some(r => r.state === 'required' && r.selector)) fail('PROVIDER_HR_ABSENCE');
   }
-  keys(c.selection, ['freeOnly', 'hrPolicy', 'minGiB', 'maxGiB', 'minSeeders', 'minLeechers', 'maxAgeHours', 'minFreeSeconds', 'sort', 'preferUploadFactor'], 'SELECTION');
+  keys(c.selection, ['freeOnly', 'hrPolicy', 'minGiB', 'maxGiB', 'minSeeders', 'minLeechers', 'maxAgeHours', 'minFreeSeconds', 'sort', 'preferUploadFactor', 'minDemandRatio', 'maxInFlightGiB'], 'SELECTION');
   const s = c.selection;
   if (typeof s.freeOnly !== 'boolean' || typeof s.preferUploadFactor !== 'boolean' || !['protect', 'exclude'].includes(s.hrPolicy) || !['publishedAt', 'demand'].includes(s.sort)) fail('PROVIDER_SELECTION');
   for (const k of ['minGiB', 'maxGiB', 'minSeeders', 'minLeechers', 'maxAgeHours', 'minFreeSeconds']) if (typeof s[k] !== 'number' || !Number.isFinite(s[k]) || s[k] < 0 || s[k] > 100000) fail('PROVIDER_THRESHOLD');
   if (s.maxGiB <= s.minGiB || s.maxAgeHours <= 0 || !Number.isInteger(s.minSeeders) || !Number.isInteger(s.minLeechers)) fail('PROVIDER_THRESHOLD');
+  for (const k of ['minDemandRatio', 'maxInFlightGiB']) {
+    if (s[k] !== undefined &&
+    (typeof s[k] !== 'number' || !Number.isFinite(s[k]) || s[k] < 0 || s[k] > 100000)) fail('PROVIDER_THRESHOLD');
+  }
   keys(c.budgets, ['listPerHour', 'detailPerHour', 'metadataPerHour', 'personalPerHour'], 'BUDGETS');
   // Retain old config bytes/digests on read. This retired field has no effect;
   // new templates/UI omit it rather than inventing a large "unlimited" number.

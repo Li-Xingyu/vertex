@@ -21,6 +21,8 @@ function initialize () {
     payload TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
   )`);
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS vertex_rss_pending_hash ON vertex_rss_pending(true_hash) WHERE true_hash != \'\'');
+  // Existing success/exit records own the entry facts; no new table or worker.
+  if (!db.pragma('table_info(torrents)').some(c => c.name === 'admission_snapshot')) db.exec('ALTER TABLE torrents ADD COLUMN admission_snapshot TEXT');
   parentPort.postMessage({ ready: true });
 }
 

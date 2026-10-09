@@ -239,6 +239,7 @@ class Rss {
         try {
           await admission.release(operation);
           if (['SQLITE_CONSTRAINT_UNIQUE', 'RSS_ALREADY_ADMITTED'].includes(error.code)) return { deferred: 'reserved' };
+          if (error.code === 'PROVIDER_OPPORTUNITY_DEFERRED') return { deferred: 'opportunity' };
           await util.runRecord('INSERT INTO torrents (hash,name,size,rss_id,link,record_time,record_type,record_note) VALUES (?,?,?,?,?,?,?,?)',
             [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 3, '添加种子失败: 未提交']);
         } catch (_) {
@@ -505,7 +506,7 @@ class Rss {
           await this._pushTorrent(torrent, firstClient);
         }
       } catch (error) {
-        if (source && error.code === 'PROVIDER_METADATA_BUSY') continue;
+        if (source && ['PROVIDER_METADATA_BUSY', 'PROVIDER_OPPORTUNITY_DEFERRED'].includes(error.code)) continue;
         if (source && error.metadataScope) {
           // A real failure is reported once, never as a permanent rejection.
           if (error.code !== 'PROVIDER_METADATA_BACKOFF') logger.error(this.alias, '种子准备失败，退避后重新评估', providers.cleanCode(error));

@@ -88,7 +88,7 @@ async function scenario (options = {}) {
     subtract () { return { unix: () => clock - 300 }; }
   });
   const redis = { async get () { return 1; }, async set () {} };
-  const admission = loader(path.join(root, 'app/libs/rss-admission.js'), { './util': util }, running);
+  const admission = loader(path.join(root, 'app/libs/rss-admission.js'), { './util': util, './provider-opportunity': require('../app/libs/provider-opportunity') }, running);
   const dependencies = {
     '../libs/util': util,
     '../libs/logger': logger,
@@ -187,6 +187,40 @@ const torrent = (n, size = n * 1024) => {
 };
 
 async function main () {
+  await test('entry fact column is additive and initialized idempotently; success facts survive exit', async () => {
+    const s = await scenario(); const q = s.queue;
+    const columns = await q.request('all', 'PRAGMA table_info(torrents)');
+    assert.equal(columns.filter(c => c.name === 'admission_snapshot').length, 1);
+    const rss = s.makeRss('1234abcd'); const torrent = {
+      hash: 'a'.repeat(40),
+      name: 'fixture',
+      size: 100,
+      link: 'https://fixture.invalid/details.php?id=12',
+      siteId: 'CARPT',
+      candidateKey: 'CARPT:12',
+      fetchedAt: Date.now() / 1000,
+      seeders: 5,
+      leechers: 20
+    };
+    await s.admission.finish(rss, torrent, s.client, 'CARPT', 'fixture-operation');
+    const before = await q.request('get', 'SELECT admission_snapshot FROM torrents WHERE hash=?', [torrent.hash]);
+    assert.equal(JSON.parse(before.admission_snapshot).leechers, 20);
+    await q.request('run', 'UPDATE torrents SET delete_time=?,upload=? WHERE hash=?', [s.now(), 200, torrent.hash]);
+    assert.equal((await q.request('get', 'SELECT admission_snapshot FROM torrents WHERE hash=?', [torrent.hash])).admission_snapshot, before.admission_snapshot);
+    await q.close();
+    const reopened = new DatabaseQueue({ filename: q.filename }); fixtures.add(reopened);
+    assert.equal((await reopened.request('all', 'PRAGMA table_info(torrents)')).filter(c => c.name === 'admission_snapshot').length, 1);
+    assert.equal((await reopened.request('get', 'SELECT admission_snapshot FROM torrents WHERE hash=?', [torrent.hash])).admission_snapshot, before.admission_snapshot);
+  });
+  await test('opportunity race releases only the unsent intent without false failure history', async () => {
+    const s = await scenario(); const rss = s.makeRss('1234abcd');
+    const torrent = { hash: 'b'.repeat(40), name: 'fixture', size: 100 };
+    const result = await rss._addTracked(torrent, s.client, 'CARPT', false, async () => { throw Object.assign(Error('deferred'), { code: 'PROVIDER_OPPORTUNITY_DEFERRED' }); });
+    assert.equal(result.deferred, 'opportunity');
+    assert.equal((await s.queue.request('all', 'SELECT * FROM vertex_rss_pending')).length, 0);
+    assert.equal((await s.queue.request('all', 'SELECT * FROM torrents')).length, 0);
+    assert.equal(s.posted.length, 0); assert.equal(s.errors.length, 0);
+  });
   await test('real SQL result shapes and original durability', async () => {
     const q = makeDatabase();
     const journal = await q.request('get', 'PRAGMA journal_mode');

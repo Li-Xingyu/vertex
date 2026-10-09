@@ -1,4 +1,5 @@
 const util = require('./util');
+const { entrySnapshot } = require('./provider-opportunity');
 
 const HASH = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const now = () => Math.floor(Date.now() / 1000);
@@ -49,6 +50,8 @@ exports.finish = async function (rss, torrent, client, category, operation, true
     { sql, params: [torrent.hash, torrent.name, torrent.size, rss.id, torrent.link, category, at, at, 1, note] }
   ];
   if (trueHash && trueHash !== torrent.hash) operations.push({ sql, params: [trueHash, torrent.name, torrent.size, rss.id, torrent.link, category, at, at, 1, note] });
+  const snapshot = !reseed && entrySnapshot(torrent, at);
+  if (snapshot) operations.push({ sql: 'UPDATE torrents SET admission_snapshot=? WHERE rss_id=? AND hash=? AND add_time=? AND record_type=1', params: [snapshot, rss.id, hash, at] });
   operations.push({ sql: 'DELETE FROM vertex_rss_pending WHERE operation=?', params: [operation] });
   // Flow + all success history + release commit together. On a lost reply, the
   // persisted intent or success history decides recovery; never re-add blindly.

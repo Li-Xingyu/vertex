@@ -313,6 +313,7 @@ class Client {
       }
       */
       logger.debug('下载器', this.alias, '获取种子信息成功');
+      this.maindata.providerSnapshotAt = Date.now() / 1000;
       this.status = true;
       this.errorCount = 0;
     } catch (error) {

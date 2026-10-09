@@ -70,6 +70,27 @@ async function main () {
     assert(!await page.$eval('.provider-page', e => /版本记录|保存草稿|编辑 v\d/.test(e.textContent)));
     assert(await page.$eval('.provider-page', e => e.textContent.includes('不设小时配额')));
     assert(!await page.$$eval('.ant-form-item-label', labels => labels.some(e => e.textContent.includes('元数据预算'))));
+    phase = 'opportunity-controls';
+    await tab('筛选条件');
+    assert.equal(await page.$('#provider-minDemandRatio'), null);
+    assert.equal(await page.$('#provider-maxInFlightGiB'), null);
+    const toggleOpportunity = async label => { const [el] = await page.$x('//label[contains(@class,"ant-checkbox-wrapper") and contains(.,"' + label + '")]'); assert(el); await el.click(); };
+    await toggleOpportunity('启用供需比门槛');
+    await page.waitForSelector('#provider-minDemandRatio');
+    assert.equal(await page.$eval('#provider-minDemandRatio', e => Number(e.value)), 0);
+    await toggleOpportunity('启用在途体积上限');
+    await page.waitForSelector('#provider-maxInFlightGiB');
+    assert(await page.$eval('.ant-tabs-tabpane-active', e => e.textContent.includes('不是物理占用或预计剩余空间')));
+    for (const width of [1440, 375]) {
+      await page.setViewport({ width, height: 1000 }); await page.waitForTimeout(200);
+      assert(await page.$eval('body', e => e.scrollWidth <= window.innerWidth + 2));
+      await page.screenshot({ path: '/tmp/provider-opportunity-' + width + '.png', fullPage: true });
+    }
+    await page.setViewport({ width: 1440, height: 1000 });
+    await toggleOpportunity('启用供需比门槛'); await toggleOpportunity('启用在途体积上限');
+    assert.equal(await page.$('#provider-minDemandRatio'), null);
+    assert.equal(await page.$('#provider-maxInFlightGiB'), null);
+    assert.equal(JSON.parse((await request('GET', '/api/provider/list', null, cookie)).text).data.records.length, 0);
     phase = 'personal-rule-editor';
     await tab('解析规则');
     assert.equal(await page.$eval('#personal-selector-0', e => e.value), 'td[title="Seeding"]');

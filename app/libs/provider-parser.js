@@ -153,6 +153,9 @@ function eligibility (c, config, now = Date.now() / 1000) {
   if (c.size === null || c.seeders === null || c.leechers === null || c.pubTime === null) why.push('missing-fields');
   if (c.size < s.minGiB * 1024 ** 3 || c.size > s.maxGiB * 1024 ** 3) why.push('size');
   if (c.seeders < s.minSeeders || c.leechers < s.minLeechers) why.push('supply-demand');
+  if (s.minDemandRatio > 0 && (!Number.isSafeInteger(c.seeders) || c.seeders < 0 ||
+    !Number.isSafeInteger(c.leechers) || c.leechers < 0 ||
+    c.leechers / Math.max(1, c.seeders) < s.minDemandRatio)) why.push('competition-deferred');
   if (now - c.pubTime > s.maxAgeHours * 3600 || c.pubTime > now + 300) why.push('age');
   if (s.hrPolicy === 'exclude' && c.hrState !== 'exempt') why.push('hr-not-exempt');
   if (s.freeOnly && c.downloadFactor !== 0) why.push('not-confirmed-free');

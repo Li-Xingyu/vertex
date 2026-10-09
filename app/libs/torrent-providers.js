@@ -6,6 +6,7 @@ const bencode = require('bencode');
 const { ProviderStore } = require('./provider-store');
 const { ProviderIdentityCache } = require('./provider-identity-cache');
 const { ProviderMetadataGate } = require('./provider-metadata-gate');
+const opportunity = require('./provider-opportunity');
 const { profiles, defaults } = require('./provider-profiles');
 const { validate, digest, fail } = require('./provider-schema');
 const parser = require('./provider-parser');
@@ -215,12 +216,20 @@ async function begin (rss, supplied) {
     s.lastSuccess = Date.now(); s.error = null; s.failures = 0; s.candidates = result.candidates.length;
     s.observations = result.candidates.slice(0, 100).map(row => summary(row, c));
     s.coverage = result.coverage;
-    s.admission = { siteActiveSkips: 0, identityHits: 0, duplicateSkips: 0, metadataRequests: 0, deferredUntil: 0, deferReason: null };
+    s.admission = { siteActiveSkips: 0, competitionSkips: 0, exposureSkips: 0, identityHits: 0, duplicateSkips: 0, metadataRequests: 0, deferredUntil: 0, deferReason: null };
     const candidates = result.candidates.filter(row => {
       if (personal.active(row, c, Date.now() / 1000)) { s.admission.siteActiveSkips++; return false; }
-      return !parser.eligibility(row, c).length;
+      const reasons = parser.eligibility(row, c);
+      if (reasons.includes('competition-deferred')) s.admission.competitionSkips++;
+      return !reasons.length;
     }).sort((a, b) => parser.rank(a, b, c));
-    if (bridge(c) && bridge(c).select) candidates.splice(0, candidates.length, ...await bridge(c).select(c, candidates));
+    if (bridge(c) && bridge(c).select) {
+      const source = new Set(candidates);
+      candidates.splice(0, candidates.length, ...await bridge(c).select(c, candidates));
+      // Ranking hooks may narrow/reorder, never reintroduce filtered candidates.
+      const selected = candidates.filter(row => source.has(row) && !parser.eligibility(row, c).length);
+      candidates.splice(0, candidates.length, ...selected);
+    }
     for (const row of candidates) {
       row.hash = 'provider:' + row.candidateKey; row.id = row.torrentId; row.description = '';
       const context = { version, rss, metadata: null };
@@ -246,14 +255,17 @@ async function history (rss, candidate) {
   // Bounded batches cover the whole RSS history; overflow blocks migration/admit.
   const p = profiles[candidate.siteId];
   const key = rss.id + ':' + candidate.siteId;
-  if (!terminalHistory.has(key)) terminalHistory.set(key, { after: 0, ids: new Set(), hashes: new Set() });
+  if (!terminalHistory.has(key)) terminalHistory.set(key, { after: 0, ids: new Set(), hashes: new Set(), originals: new Map() });
   const index = terminalHistory.get(key);
   for (let page = 0; page < 40; page++) {
-    const rows = await util().getRecords('SELECT id,hash,link,record_type,record_note FROM torrents WHERE rss_id=? AND id>? AND record_type IN (1,3) ORDER BY id LIMIT 500', [rss.id, index.after]);
+    const rows = await util().getRecords('SELECT id,hash,link,size,add_time,record_type,record_note FROM torrents WHERE rss_id=? AND id>? AND record_type IN (1,3) ORDER BY id LIMIT 500', [rss.id, index.after]);
     for (const row of rows) {
       index.after = row.id;
       if (+row.record_type === 3 && row.record_note === '添加种子失败: 未提交') continue;
       index.hashes.add(row.hash);
+      if (+row.record_type === 1 && row.record_note === '添加种子' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(row.hash)) {
+        index.originals.set(row.hash.toLowerCase(), { size: row.size, at: row.add_time });
+      }
       try {
         const link = new URL(row.link);
         const id = link.searchParams.get(candidate.siteId === 'HAIDAN' ? 'torrent_id' : 'id') || ((candidate.siteId === 'MTEAM' && link.pathname.match(/^\/detail\/(\d+)$/)) || [])[1];
@@ -264,6 +276,20 @@ async function history (rss, candidate) {
     if (rows.length < 500) return index.hashes.has(candidate.hash) || (candidate.siteId === 'MTEAM' && index.hashes.has('mt-free-' + candidate.torrentId)) || index.ids.has(candidate.torrentId);
   }
   fail('PROVIDER_HISTORY_COVERAGE_LIMIT');
+}
+async function checkExposure (rss, candidate, client, context, pending, ownIntent = false) {
+  const c = context.version.config;
+  if (!c.selection.maxInFlightGiB) return true;
+  // Reuse the bounded canonical success index, not categories or tracker labels.
+  if (!pending) await history(rss, candidate);
+  if (!pending) pending = await util().getRecords('SELECT candidate_hash,true_hash,client_id,payload FROM vertex_rss_pending WHERE rss_id=? LIMIT 501', [rss.id]);
+  if (pending.length > 500) fail('PROVIDER_PENDING_COVERAGE_LIMIT');
+  const owners = terminalHistory.get(rss.id + ':' + candidate.siteId).originals;
+  const result = opportunity.exposure(c.selection, owners, client.maindata, pending, candidate, Date.now() / 1000, ownIntent);
+  const stats = state(rss.id).admission;
+  stats.exposure = result;
+  if (!result.allowed) { stats.exposureSkips++; stats.deferReason = result.reason; }
+  return result.allowed;
 }
 async function prepare (rss, candidate, client) {
   const context = prepared.get(candidate);
@@ -285,7 +311,7 @@ async function prepareCandidate (rss, candidate, client, context) {
   const current = await active(rss.id);
   if (!current || current.suspended || current.digest !== context.version.digest) fail('PROVIDER_CONFIG_CHANGED');
   if (personal.active(candidate, c, Date.now() / 1000) || parser.eligibility(candidate, c).length || await history(rss, candidate)) return false;
-  const pending = await util().getRecords('SELECT candidate_hash,payload FROM vertex_rss_pending WHERE rss_id=? LIMIT 501', [rss.id]);
+  const pending = await util().getRecords('SELECT candidate_hash,true_hash,client_id,payload FROM vertex_rss_pending WHERE rss_id=? LIMIT 501', [rss.id]);
   if (pending.length > 500) fail('PROVIDER_PENDING_COVERAGE_LIMIT');
   for (const item of pending) {
     const row = JSON.parse(item.payload).torrent;
@@ -303,6 +329,7 @@ async function prepareCandidate (rss, candidate, client, context) {
       return false;
     }
   }
+  if (!await checkExposure(rss, candidate, client, context, pending)) return false;
   await consume(c, 'metadata');
   stats.metadataRequests++;
   let body;
@@ -331,6 +358,7 @@ async function prepareCandidate (rss, candidate, client, context) {
   if ((client.maindata.torrents || []).some(t => t.hash === hash) || await client.hasTorrent(hash)) return false;
   if (await util().getRecord('SELECT operation FROM vertex_rss_pending WHERE true_hash=? OR candidate_hash=? LIMIT 1', [hash, hash])) return false;
   if (owner && owner.validateFinal && !await owner.validateFinal(c, next, client)) return false;
+  if (!await checkExposure(rss, next, client, context)) return false;
   const check = await active(rss.id);
   if (!check || check.suspended || check.digest !== context.version.digest) fail('PROVIDER_CONFIG_CHANGED');
   const filepath = path.join(__dirname, '../../torrents', hash + '.torrent');
@@ -367,6 +395,7 @@ async function finalCheck (rss, candidate, client) {
   if (!context) return;
   const c = context.version.config; const current = await active(rss.id);
   if (!current || current.suspended || current.digest !== context.version.digest || !context.metadata || context.clientId !== client.id || parser.eligibility(candidate, c).length) fail('PROVIDER_CONFIG_CHANGED');
+  if (!await checkExposure(rss, candidate, client, context, undefined, true)) fail('PROVIDER_OPPORTUNITY_DEFERRED');
   if (bridge(c) && bridge(c).validateFinal && !await bridge(c).validateFinal(c, candidate, client)) fail('PROVIDER_FINAL_GUARD');
 }
 async function list () {

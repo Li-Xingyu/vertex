@@ -16,6 +16,8 @@
           <template v-else-if="column.key === 'state'">
             <a-tag :color="record.suspended ? 'warning' : record.active === null ? 'default' : 'success'">{{ runtimeLabel(record) }}</a-tag>
             <small v-if="rssDisabled(record.id)" class="provider-secondary provider-block">原 RSS 任务未启用</small>
+            <small v-if="record.status?.admission" class="provider-secondary provider-block">竞争暂缓 {{ record.status.admission.competitionSkips || 0 }} · 投入暂缓 {{ record.status.admission.exposureSkips || 0 }}</small>
+            <small v-if="record.status?.admission?.exposure?.enabled" class="provider-secondary provider-block">{{ exposureText(record.status.admission.exposure) }}</small>
           </template>
           <template v-else-if="column.key === 'time'"><span>{{ timestamp(record.status?.lastSuccess) }}</span><div v-if="record.status?.error" class="provider-status-error">{{ explain(record.status.error) }}</div><small v-if="record.status?.admission" class="provider-secondary provider-block">本轮：站内活动跳过 {{ record.status.admission.siteActiveSkips || 0 }} · 缓存确认重复 {{ record.status.admission.duplicateSkips || 0 }} · 元数据请求 {{ record.status.admission.metadataRequests || 0 }}</small><small v-if="record.status?.coverage?.personal?.outcome === 'fallback'" class="provider-secondary provider-block">个人状态查询不可用或额度已用完，本轮使用本地去重。</small></template>
           <template v-else-if="column.key === 'actions'"><a-button type="link" size="small" :disabled="busy" :aria-label="'编辑 ' + rssName(record.id)" @click="edit(record)">编辑</a-button></template>
@@ -62,6 +64,10 @@
                 <a-form-item label="免费下载" :name="['selection', 'freeOnly']"><a-checkbox v-model:checked="config.selection.freeOnly" :disabled="busy">仅选择已确认免费</a-checkbox></a-form-item>
                 <a-form-item label="H&R 入场" :name="['selection', 'hrPolicy']" extra="无标记默认未知；仅在站规已确认且配置了完整性检查时，才能判为无 H&R。此处不修改保种或删种规则。"><a-select size="small" v-model:value="config.selection.hrPolicy" :disabled="busy" :options="[{value:'protect', label:'允许入场，保留现有保种保护'}, {value:'exclude', label:'仅选择已确认无 H&R'}]" /></a-form-item>
                 <a-form-item v-for="(label, key) in selectionLabels" :key="key" :label="label" :name="['selection', key]" :rules="selectionRules(key)"><a-input-number size="small" v-model:value="config.selection[key]" :min="0" :max="100000" :disabled="busy" /></a-form-item>
+                <a-form-item label="竞争准入" extra="下载人数 / max(1, 做种人数)。未达门槛暂缓，下轮重新评估，不写永久拒绝、不暂停旧任务；倍率不能绕过门槛。"><a-checkbox :checked="config.selection.minDemandRatio !== undefined" :disabled="busy" @change="setOpportunity('minDemandRatio', $event.target.checked)">启用供需比门槛</a-checkbox></a-form-item>
+                <a-form-item v-if="config.selection.minDemandRatio !== undefined" label="最低供需比" :name="['selection', 'minDemandRatio']" :rules="numberRules(0, 100000)" extra="例如 0.25 表示下载人数至少为做种人数的四分之一；0 不限制。这不是实际收益保证。"><a-input-number id="provider-minDemandRatio" size="small" v-model:value="config.selection.minDemandRatio" :min="0" :max="100000" :step="0.05" :disabled="busy" /></a-form-item>
+                <a-form-item label="在途投入" extra="仅约束该采集来源的新原下载，不限制每小时个数，不改做种、辅种或回收保护。"><a-checkbox :checked="config.selection.maxInFlightGiB !== undefined" :disabled="busy" @change="setOpportunity('maxInFlightGiB', $event.target.checked)">启用在途体积上限</a-checkbox></a-form-item>
+                <a-form-item v-if="config.selection.maxInFlightGiB !== undefined" label="在途上限（GiB）" :name="['selection', 'maxInFlightGiB']" :rules="numberRules(0, 100000)" extra="按原下载未完成任务的完整体积及待确认添加合计；暂停也占额度。不是物理占用或预计剩余空间。完成后释放投入额度；0 不限制。"><a-input-number id="provider-maxInFlightGiB" size="small" v-model:value="config.selection.maxInFlightGiB" :min="0" :max="100000" :disabled="busy" /></a-form-item>
                 <a-form-item label="多倍上传" :name="['selection', 'preferUploadFactor']" extra="上传倍率与免费分别识别。私有迁移策略仍可能执行更严格的排序。"><a-checkbox v-model:checked="config.selection.preferUploadFactor" :disabled="busy">优先已确认且未过期的上传倍率</a-checkbox></a-form-item>
                 <a-form-item label="基础排序" :name="['selection', 'sort']"><a-select size="small" v-model:value="config.selection.sort" :disabled="busy" :options="[{value:'publishedAt', label:'新发布优先'}, {value:'demand', label:'需求优先（下载人数 / √做种人数 × 有效倍率）'}]" /></a-form-item>
               </a-tab-pane>
@@ -258,7 +264,7 @@ export default {
   watch: { config: { deep: true, handler () { if (this.previewResult && this.previewJson !== JSON.stringify(this.config)) { this.previewResult = null; this.previewJson = ''; } } } },
   methods: {
     explain (code) { return errors[code] || (/^PROVIDER_/.test(code || '') ? '配置或采集校验失败（' + code + '），请核对当前设置。' : '操作失败，请检查服务连接后重试。当前输入已保留。'); },
-    reason (key) { return ({ 'personal-active': '站内当前账号正在下载／做种', 'conflicting-evidence': '证据冲突', stale: '数据过期', 'missing-fields': '关键字段未知', size: '体积范围', 'supply-demand': '供需不达标', age: '种龄/时间异常', 'hr-not-exempt': '未明确免 H&R', 'not-confirmed-free': '未确认免费', 'free-expiry-unverified': '免费期限未知或不足' })[key] || key; },
+    reason (key) { return ({ 'competition-deferred': '供应竞争过高，本轮暂缓', 'personal-active': '站内当前账号正在下载／做种', 'conflicting-evidence': '证据冲突', stale: '数据过期', 'missing-fields': '关键字段未知', size: '体积范围', 'supply-demand': '供需不达标', age: '种龄/时间异常', 'hr-not-exempt': '未明确免 H&R', 'not-confirmed-free': '未确认免费', 'free-expiry-unverified': '免费期限未知或不足' })[key] || key; },
     factor (v) { return v == null ? '未知' : v + '×'; },
     timestamp (v) { return v ? this.$moment(v).format('YYYY-MM-DD HH:mm:ss') : '暂无记录'; },
     rssName (id) { return this.data.rss.find(r => r.id === id)?.alias || id; },
@@ -270,6 +276,8 @@ export default {
     budgetHelp (key) { return key === 'detailPerHour' && !this.jsonMode ? 'HTML 自动详情补齐尚未实现，此项仅保留配置，不参与请求。' : '单位：次/小时。模板上限 ' + this.selectedProfile.budgetCaps[key] + '，仍受原驱动更严格的预算约束。'; },
     numberRules (min, max, integer = false) { return [{ required: true, type: integer ? 'integer' : 'number', min, max, message: '请输入 ' + min + '–' + max + (integer ? ' 之间的整数' : ' 之间的数值') }]; },
     setTimeouts (enabled) { if (enabled) this.config.listTimeouts = { connectSeconds: 15, readSeconds: 30, requestSeconds: 60, cycleSeconds: 120 }; else delete this.config.listTimeouts; },
+    setOpportunity (key, enabled) { if (enabled) this.config.selection[key] = 0; else delete this.config.selection[key]; },
+    exposureText (value) { return value.reason === 'exposure-unverified' ? '在途证据未齐或已过期，本轮暂缓' : '在途投入 ' + Number(value.usedGiB).toFixed(1) + ' / ' + value.limitGiB + ' GiB（非物理占用）'; },
     timeoutRules (key) {
       return [...this.numberRules(1, this.timeoutFields[key].max, true), { validator: () => {
         const t = this.config.listTimeouts;
